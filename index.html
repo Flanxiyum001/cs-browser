@@ -23,6 +23,12 @@
    Nothing else in this file has to change.
   ===========================================================================
 -->
+<!-- The relay in server.js serves the pinned three.js build out of node_modules
+     at /vendor/three.module.js, so this page has zero third-party network
+     calls and works offline. The import map below is required for real
+     browsers: ES modules refuse to run when the browser does not see the
+     script as a module, and /vendor/three.module.js is served as
+     text/html (a directory listing), which is the 404/black-screen cause. -->
 <script type="importmap">
 {
   "imports": {
