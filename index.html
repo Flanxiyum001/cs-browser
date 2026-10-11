@@ -315,6 +315,24 @@
   .paused-title { font-size: 13px; letter-spacing: 0.5em; color: var(--amber); text-transform: uppercase; }
   .paused-sub { font-size: 11px; letter-spacing: 0.2em; color: var(--steel-dim); margin-top: 10px; }
   .paused-btns { display: flex; gap: 10px; margin-top: 24px; }
+  #share-hint, #share-hint-2 {
+    margin-top: 14px; font-size: 11px; letter-spacing: 0.14em; color: var(--steel-dim);
+    text-transform: uppercase;
+  }
+  #share-hint b, #share-hint-2 b { color: var(--steel); font-weight: 500; text-transform: none; letter-spacing: 0; }
+  #room-count, #room-count-2 { color: var(--amber-dim); }
+  /* Sub-controls, deliberately quiet: inline, no box, amber only on hover, so
+     the invite line still reads as information rather than another button. */
+  #share-hint button, #share-hint-2 button, #frame-note button, #frame-note-2 button {
+    font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--amber);
+    background: none; border: 0; margin: 0; padding: 0 0 0 8px; cursor: pointer;
+  }
+  #share-hint button:hover, #share-hint-2 button:hover,
+  #frame-note button:hover, #frame-note-2 button:hover { text-decoration: underline; }
+  #frame-note, #frame-note-2 {
+    margin-top: 10px; font-size: 11px; letter-spacing: 0.14em; color: var(--steel-dim);
+  }
+  #frame-note[hidden], #frame-note-2[hidden], #lock-note[hidden] { display: none; }
 
   #boot { position: fixed; inset: 0; z-index: 40; background: var(--ink); display: flex; align-items: center; justify-content: center; }
   #boot[hidden] { display: none; }
@@ -341,6 +359,8 @@
       <div class="row"><span class="k">link</span><span class="v" id="conn">init</span></div>
       <div class="row"><span class="k">ping</span><span class="v" id="ping">--</span></div>
       <div class="row"><span class="k">players</span><span class="v" id="pcount">1</span></div>
+      <div class="row"><span class="k">fps</span><span class="v" id="fps">--</span></div>
+      <div class="row"><span class="k">gfx</span><span class="v" id="gfx">auto</span></div>
       <div class="row"><span class="k">id</span><span class="v" id="pid">--</span></div>
     </div>
 
@@ -416,6 +436,7 @@
       <div class="item"><span>knife / smoke</span><span>3 / 4</span></div>
       <div class="item"><span>flashbang</span><span>5</span></div>
       <div class="item"><span>scoreboard</span><span>hold tab</span></div>
+      <div class="item"><span>release pointer</span><span>middle click / esc</span></div>
     </div>
 
     <div class="rule"></div>
@@ -426,6 +447,21 @@
     </div>
 
     <div id="conn-note">linking to relay&hellip;</div>
+    <!-- Multiplayer is also the lobby: friends open this same URL and land in
+         the same match, because the relay that served the page is the room. The
+         address is filled from location at runtime, so it can never disagree
+         with the socket the client actually dials. -->
+    <div id="share-hint">
+      <span id="room-count">solo</span> &middot; friends join at
+      <b id="share-url">&hellip;</b><button id="copy-link">copy invite link</button>
+    </div>
+    <!-- Shown only when the page is embedded: a framed page can be refused
+         pointer lock outright, and that is worth saying before the player
+         wonders why the cursor keeps leaving the window. -->
+    <div id="frame-note" hidden>
+      this page is inside a frame, which can block pointer lock &mdash;
+      <button id="open-tab">open in its own tab</button>
+    </div>
   </div>
 
   <!-- =======================================================================
@@ -434,11 +470,23 @@
   <div id="paused" class="screen" hidden>
     <div class="paused-title">paused</div>
     <div class="paused-sub">pointer released &mdash; the match keeps running</div>
+    <div class="paused-sub">click anywhere to lock it back &middot; middle click or esc releases it</div>
     <div class="paused-btns">
       <button id="resume-btn" class="act">resume</button>
       <button id="sens-btn" class="act ghost">sensitivity <span id="sens-val">1.0</span></button>
     </div>
     <div id="conn-note-2" class="paused-sub"></div>
+    <!-- Why the cursor came back, when the reason was not the player. Empty and
+         hidden in the ordinary case. -->
+    <div id="lock-note" class="paused-sub" hidden></div>
+    <div id="share-hint-2">
+      <span id="room-count-2">solo</span> &middot; friends join at
+      <b id="share-url-2">&hellip;</b><button id="copy-link-2">copy invite link</button>
+    </div>
+    <div id="frame-note-2" class="paused-sub" hidden>
+      pointer lock can be blocked inside a frame &mdash;
+      <button id="open-tab-2">open in its own tab</button>
+    </div>
   </div>
 
   <div id="boot"><div class="txt">booting <b>engine</b></div></div>
@@ -555,6 +603,22 @@ const CFG = {
   reconnectMinMs: 800,
   reconnectMaxMs: 8000,
 
+  /* --- pointer lock --------------------------------------------------------
+     The cursor has to stay inside the window: on a multi-monitor desk an
+     unlocked pointer simply walks onto the next screen mid-fight, which is the
+     entire reason to lock it. The browser owns the mechanic; these numbers
+     only govern how hard the client tries when a request is refused. */
+  relockRetryMs: [0, 250, 600, 1200, 2000],
+
+  /* --- frame budget --------------------------------------------------------
+     Measured work per frame (simulate + renders), not the vsync interval, so
+     these numbers hold on any refresh rate. 12 ms leaves a display refresh,
+     the compositor and the socket their own time in a 16.7 ms frame. */
+  qualitySlowMs: 12,
+  qualityFastMs: 6,
+  qualityHoldMs: 900,
+  qualityCooldownMs: 2500,
+
   /* --- camera ------------------------------------------------------------- */
   fov: 78,
   near: 0.045,
@@ -604,6 +668,74 @@ const CFG = {
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const lerp = (a, b, t) => a + (b - a) * t;
 const damp = (a, b, rate, dt) => lerp(a, b, 1 - Math.exp(-rate * dt));
+
+/**
+ * Render quality tiers, best first.
+ *
+ * Fill rate -- shadow pass plus fragments -- is what actually costs a frame in
+ * this scene, so the dial that moves is the render resolution, and dropping
+ * the shadow pass entirely is the last resort. Resolution is also the only dial
+ * that can be moved without recompiling a single shader, which is what makes it
+ * safe to adjust mid-match. The device's own pixel ratio is the ceiling: a 3x
+ * buffer on a retina laptop is pure waste in a fast game, so tier 0 caps it.
+ */
+const QUALITY_TIERS = [
+  { ratio: 1.5, shadows: true },
+  { ratio: 1.25, shadows: true },
+  { ratio: 1.0, shadows: true },
+  { ratio: 0.75, shadows: false },
+];
+
+/**
+ * How long to wait before pointer-lock attempt number `n`.
+ *
+ * Zero for the first attempt: the request is normally honoured straight off the
+ * click that asked for it, and a delay there would be felt as lag. The tail
+ * exists because a browser may refuse a re-lock for a short window after the
+ * player pressed Escape -- the request is legal, just early -- so the client
+ * walks past that window on its own instead of leaving the player with a free
+ * cursor wondering why they cannot aim any more. Pure, so the retry schedule
+ * is testable without a browser.
+ */
+function relockDelay(n) {
+  const schedule = CFG.relockRetryMs;
+  return schedule[Math.min(n, schedule.length - 1)];
+}
+
+/**
+ * Adaptive render quality, one frame at a time.
+ *
+ * `workMs` is how long the frame's own work took -- simulate plus both render
+ * passes -- which excludes the idle wait for the display refresh. That matters:
+ * the budget below then means the same thing on a 60 Hz laptop and a 240 Hz
+ * monitor, instead of reading a perfectly smooth 60 Hz frame as "late".
+ *
+ * State in, state out: the accumulators are plain numbers, so the whole policy
+ * is a pure function and the harness can drive it frame by frame. Stepping down
+ * is quick, because a late frame is felt immediately; stepping back up needs
+ * three times the evidence, so a quiet moment between two firefights is not
+ * mistaken for headroom. At most one step per cooldown, so the resolution can
+ * never chase the load it is measuring.
+ */
+function qualityStep(tier, workMs, dtMs, acc) {
+  let slowFor = acc.slowFor;
+  let fastFor = acc.fastFor;
+  let sinceStep = acc.sinceStep + dtMs;
+  let changed = false;
+
+  if (workMs >= CFG.qualitySlowMs) { slowFor += dtMs; fastFor = 0; }
+  else if (workMs <= CFG.qualityFastMs) { fastFor += dtMs; slowFor = 0; }
+  else { slowFor = 0; fastFor = 0; }
+
+  if (sinceStep >= CFG.qualityCooldownMs) {
+    if (slowFor >= CFG.qualityHoldMs && tier < QUALITY_TIERS.length - 1) {
+      tier += 1; slowFor = 0; sinceStep = 0; changed = true;
+    } else if (fastFor >= CFG.qualityHoldMs * 3 && tier > 0) {
+      tier -= 1; fastFor = 0; sinceStep = 0; changed = true;
+    }
+  }
+  return { tier, slowFor, fastFor, sinceStep, changed };
+}
 /** Deterministic 32-bit hash - used to derive per-player identity colours. */
 function hashInt(str) {
   let h = 2166136261;
@@ -2285,6 +2417,12 @@ class RemotePlayer {
 /* ===========================================================================
    [ 9 ]  LOCAL PLAYER + INPUT
    =========================================================================== */
+
+/* Cleared the first time a browser refuses the raw-motion form of
+   requestPointerLock, so the client stops asking for a mode this platform does
+   not have instead of throwing on every attempt. */
+let RAW_MOTION = true;
+
 class Input {
   constructor() {
     this.keys = new Set();
@@ -2318,12 +2456,36 @@ class Input {
     });
 
     canvas.addEventListener('mousedown', (e) => {
+      // Middle button is the deliberate "give me my cursor back" control. It is
+      // handled in both states, and preventDefault stops the browser's own
+      // middle-click autoscroll from kicking in behind the canvas.
+      if (e.button === 1) {
+        e.preventDefault();
+        hooks.onMiddleDown?.();
+        return;
+      }
+      // Unlocked clicks are handled once, at window level (see below): the
+      // canvas only sees them when nothing is covering it, and a browser
+      // bubbles them to the window as well, so answering here too would send
+      // two competing lock requests for one click.
       if (!this.locked) return;
       if (e.button === 0) { this.mouse.down = true; hooks.onFire?.(); }
       if (e.button === 2) hooks.onAltFire?.();
     });
     window.addEventListener('mouseup', (e) => { if (e.button === 0) this.mouse.down = false; });
     window.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    /* Clicking to get the pointer back cannot be a canvas listener: while the
+       pointer is unlocked a full-screen overlay covers the canvas, so the
+       canvas never sees the click that is supposed to restore the lock. Listen
+       on the window instead, and let real controls (a button, the callsign
+       field) keep their own clicks. */
+    window.addEventListener('mousedown', (e) => {
+      if (this.locked || e.button !== 0) return;
+      const el = e.target;
+      if (el && typeof el.closest === 'function' && el.closest('button, input, a, select, label')) return;
+      hooks.onUnlockedClick?.();
+    });
     window.addEventListener('wheel', (e) => { this.wheel += e.deltaY; }, { passive: true });
   }
 
@@ -2784,6 +2946,7 @@ class Game {
     this.smokes = [];
     this.grenades = [];
     this.running = false;
+    this.deployed = false;        // has the player entered the match at least once
     this.respawnTimer = 0;
     this.lastHitBy = null;
     this.fps = 0;
@@ -2792,15 +2955,35 @@ class Game {
     this.scoreboardRows = [];
     this._acc = 0;
     this._frames = 0;
+
+    /* --- pointer lock ------------------------------------------------------ */
+    this._lockAttempt = 0;       // retries spent on the current lock request
+    this._lockTimer = null;
+    this._roomCountEls = [];
+
+    /* --- adaptive quality --------------------------------------------------
+       `sinceStep` starts at the cooldown so the first step is allowed as soon
+       as there is a full hold window of evidence. */
+    this._quality = { tier: 0, slowFor: 0, fastFor: 0, sinceStep: CFG.qualityCooldownMs };
+    this._workMs = 0;
   }
 
   /* ------------------------------------------------------------------ boot */
   init() {
     /* --- renderer ------------------------------------------------------- */
+    /* `antialias` is only worth its bandwidth at 1x: on a high-DPI display the
+       buffer is already supersampled, so multisampling it again is pure fill
+       cost. Alpha and the read-back buffer are dropped for the same reason --
+       nothing here composites the canvas or reads pixels out of it. */
+    const deviceRatio = window.devicePixelRatio || 1;
     const renderer = new THREE.WebGLRenderer({
-      antialias: true, powerPreference: 'high-performance', stencil: false,
+      antialias: deviceRatio <= 1.25,
+      powerPreference: 'high-performance',
+      stencil: false,
+      alpha: false,
+      preserveDrawingBuffer: false,
     });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(Math.min(deviceRatio, QUALITY_TIERS[0].ratio));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -2912,8 +3095,13 @@ class Game {
     this.input.attach(renderer.domElement, {
       onKey: (e) => this._onKeyDown(e),
       onLockChange: (locked) => this._onLockChange(locked),
+      onLockError: () => this._onLockError(),
       onFire: () => this._pullTrigger(),
       onAltFire: () => {},
+      // Middle click is the deliberate release; a left click anywhere else is
+      // the request to take the pointer back.
+      onMiddleDown: () => this._releaseLock(),
+      onUnlockedClick: () => { if (this.deployed) this._requestLock(true); },
     });
 
     window.addEventListener('resize', () => this._onResize());
@@ -2926,7 +3114,7 @@ class Game {
     nameInput.value = localStorage.getItem('csb.name') || '';
 
     document.getElementById('start-btn').addEventListener('click', () => this._deploy());
-    document.getElementById('resume-btn').addEventListener('click', () => this._requestLock());
+    document.getElementById('resume-btn').addEventListener('click', () => this._requestLock(true));
     document.getElementById('sens-btn').addEventListener('click', () => {
       const next = Math.round((CFG.sensitivity * 1000) / 0.5) + 1;
       CFG.sensitivity = clamp(next * 0.0005, 0.0005, 0.006);
@@ -2938,6 +3126,9 @@ class Game {
     document.getElementById('sens-val').textContent = (CFG.sensitivity / 0.0021).toFixed(1);
 
     this.player.spawn(this.level.spawnPoint([]));
+
+    /* --- invite / room state ----------------------------------------------- */
+    this._wireInvite();
 
     /* --- go ---------------------------------------------------------------- */
     document.getElementById('boot').hidden = true;
@@ -2961,6 +3152,7 @@ class Game {
       }
       if (s.detail) this.hud.setNote(`relay error: ${s.detail}`, 'err');
       this.hud.setNote2(net.connected ? `relay: online  -  ping ${net.ping}ms` : 'relay: offline (solo practice)');
+      this._updateRoomCount();
     });
 
     net.on('open', () => {
@@ -2974,12 +3166,14 @@ class Game {
       }
       this.scoreboardRows = msg.scores || [];
       this.hud.setNote('relay connected \u2014 click to deploy');
+      this._updateRoomCount();
     });
 
     net.on('join', (msg) => {
       if (msg.id === net.id) return;
       const r = this._addRemote(msg.id, msg.n, null);
       this.hud.killFeed(`${msg.n || 'OPERATIVE'}`, 'joined', 'net', false);
+      this._updateRoomCount();
       void r;
     });
 
@@ -2987,6 +3181,7 @@ class Game {
       const r = this.remotes.get(msg.id);
       if (r) { r.dispose(); this.remotes.delete(msg.id); }
       if (msg.s) this.scoreboardRows = msg.s;
+      this._updateRoomCount();
     });
 
     net.on('move', (msg) => {
@@ -3082,25 +3277,173 @@ class Game {
     const input = document.getElementById('start-name');
     const name = (input.value || 'OPERATIVE').toUpperCase().slice(0, 16);
     localStorage.setItem('csb.name', name);
+    this.deployed = true;
     this.net.send({ t: 'hello', n: name });
     sfx.unlock();
-    this._requestLock();
+    this._requestLock(true);
   }
 
-  _requestLock() {
-    const el = this.renderer.domElement;
-    const p = el.requestPointerLock?.({ unadjustedMovement: true });
-    if (p && typeof p.catch === 'function') {
-      p.catch(() => el.requestPointerLock());
+  /* ------------------------------------------------------------ invite -----
+     Multiplayer is the point, and the lobby is as simple as it gets: the relay
+     that served this page is the room, so a friend who opens the same URL is
+     in the match -- no account, no code, no host to configure. The URL shown is
+     read from location at runtime, so it can never drift from the socket the
+     client actually dials. */
+  _wireInvite() {
+    const join = location.href;
+    for (const el of [document.getElementById('share-url'), document.getElementById('share-url-2')]) {
+      el.textContent = join;
+      el.title = join;
     }
+    this._roomCountEls = [document.getElementById('room-count'), document.getElementById('room-count-2')];
+
+    for (const btn of [document.getElementById('copy-link'), document.getElementById('copy-link-2')]) {
+      const label = btn.textContent;
+      btn.addEventListener('click', async () => {
+        let ok = true;
+        try {
+          await navigator.clipboard.writeText(join);
+        } catch {
+          // No clipboard access (an insecure origin, or a denied permission).
+          // Say so -- the URL is on screen in any case, ready to select.
+          ok = false;
+        }
+        btn.textContent = ok ? 'copied' : 'copy failed \u2014 select the link';
+        setTimeout(() => { btn.textContent = label; }, 1800);
+      });
+    }
+
+    /* A cross-origin frame can be refused pointer lock outright (permissions
+       policy, or a sandboxed iframe), and from inside the game that refusal
+       looks exactly like a broken build. When this page is framed, say so up
+       front and offer the one thing that fixes it: its own tab. An anchor click
+       is used rather than window.open so noopener applies and it really is a
+       tab, not a popup window. */
+    if (window.self !== window.top) {
+      document.getElementById('frame-note').hidden = false;
+      document.getElementById('frame-note-2').hidden = false;
+      const open = () => {
+        const a = document.createElement('a');
+        a.href = join;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      };
+      document.getElementById('open-tab').addEventListener('click', open);
+      document.getElementById('open-tab-2').addEventListener('click', open);
+    }
+    this._updateRoomCount();
+  }
+
+  _updateRoomCount() {
+    const text = this.net.connected ? `${1 + this.remotes.size} in room` : 'solo (relay offline)';
+    for (const el of this._roomCountEls) el.textContent = text;
+  }
+
+  /* ------------------------------------------------------- pointer lock ----
+     On a multi-monitor desk an unlocked pointer walks onto the next screen the
+     moment the player turns left, so keeping the lock engaged is part of the
+     controls, not a nicety. The browser owns the mechanic and refuses requests
+     without explaining why, so this layer is deliberately opinionated:
+
+       * a left click anywhere, or the resume button, requests the lock
+       * a middle click gives the cursor back on purpose
+       * a refusal is retried on a short schedule, because the most common
+         refusal is the browser declining a re-lock for a moment right after
+         the player pressed Escape -- a legal request made too early
+       * when it keeps failing, the screen names the reason instead of leaving
+         the player with a free cursor and no explanation
+  */
+  _requestLock(fromGesture = false) {
+    const el = this.renderer.domElement;
+    if (document.pointerLockElement === el) return;
+    if (fromGesture) { this._lockAttempt = 0; this._lockSay(''); }
+    clearTimeout(this._lockTimer);
+
+    let request = null;
+    try {
+      // Raw mouse motion (no OS acceleration) is what an aim model like this
+      // wants. Browsers that do not take the options object throw here, which
+      // is what the flag remembers.
+      request = RAW_MOTION ? el.requestPointerLock({ unadjustedMovement: true }) : el.requestPointerLock();
+    } catch {
+      RAW_MOTION = false;
+      try { request = el.requestPointerLock(); } catch { request = null; }
+    }
+    if (request && typeof request.catch === 'function') {
+      request.catch(() => {
+        // Refused, or no raw-motion mode on this platform. Drop the option and
+        // retry plain: pointerlockerror owns the retry policy, so the two paths
+        // can never schedule competing attempts.
+        RAW_MOTION = false;
+        try { el.requestPointerLock(); } catch { /* reported via pointerlockerror */ }
+      });
+    }
+  }
+
+  _onLockError() {
+    // A refusal after the match has begun means the player is sitting behind a
+    // live cursor, not on the start screen. Show the pause screen, because that
+    // is where the reason for the refusal is written.
+    if (this.deployed) {
+      this.overlay.hidden = true;
+      this.paused.hidden = false;
+    }
+    if (this._lockAttempt >= CFG.relockRetryMs.length) {
+      // Out of attempts. Name which wall this is: the two causes have completely
+      // different fixes and neither is visible from inside the game.
+      this._lockSay(window.self !== window.top
+        ? 'this page is embedded in a frame that will not grant pointer lock \u2014 open it in its own tab'
+        : 'the browser refused pointer lock \u2014 press resume, or reload the page');
+      return;
+    }
+    const wait = relockDelay(this._lockAttempt);
+    this._lockAttempt++;
+    this._lockTimer = setTimeout(() => this._requestLock(false), wait);
+    this._lockSay(wait
+      ? `pointer lock refused \u2014 retrying in ${(wait / 1000).toFixed(2)}s\u2026`
+      : 'pointer lock refused \u2014 retrying\u2026');
+  }
+
+  /** The middle mouse button: release the cursor on purpose. */
+  _releaseLock() {
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  _lockSay(text) {
+    const el = document.getElementById('lock-note');
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = !text;
   }
 
   _onLockChange(locked) {
     this.running = locked;
-    this.overlay.hidden = locked;
-    this.paused.hidden = locked;
+    // The start screen is for entering the match. Once that has happened an
+    // unlocked pointer means the pause screen -- showing "click to deploy"
+    // again after Escape reads as if the match had been lost.
+    this.overlay.hidden = locked || this.deployed;
+    this.paused.hidden = locked || !this.deployed;
+    if (locked) {
+      this._lockAttempt = 0;
+      clearTimeout(this._lockTimer);
+      this._lockTimer = null;
+      this._lockSay('');
+      sfx.unlock();
+    }
     this.hud.setNote2(this.net.connected ? `relay: online  -  ping ${this.net.ping}ms` : 'relay: offline (solo practice)');
-    if (locked) sfx.unlock();
+  }
+
+  /* ------------------------------------------------------- frame budget ----
+     Apply a quality tier. Resolution is the only dial that moves without
+     recompiling a shader, and the shadow toggle is reached rarely enough that
+     its one-off recompile is worth the frames it buys back. */
+  _applyQualityTier(tier) {
+    const t = QUALITY_TIERS[clamp(tier, 0, QUALITY_TIERS.length - 1)];
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, t.ratio));
+    if (this.renderer.shadowMap.enabled !== t.shadows) this.renderer.shadowMap.enabled = t.shadows;
   }
 
   _onResize() {
@@ -3494,6 +3837,12 @@ class Game {
     this._acc += dt;
     if (this._acc > 0.5) { this.fps = Math.round(this._frames / this._acc); this._frames = 0; this._acc = 0; }
 
+    /* The frame's own work, measured around it: simulate + both render passes.
+       That excludes the idle wait for the display refresh, which is what makes
+       the adaptive policy below mean the same thing on a 60 Hz laptop and a
+       240 Hz monitor. Smoothed over roughly ten frames so a single hitch (a
+       texture upload, a tab regaining focus) never moves the resolution. */
+    const workStart = performance.now();
     this._update(dt);
 
     /* two-pass render: world, then the viewmodel on a cleared depth buffer */
@@ -3502,6 +3851,12 @@ class Game {
     this.renderer.clearDepth();
     this.renderer.render(this.viewScene, this.viewCamera);
     this.renderer.autoClear = true;
+
+    const workMs = performance.now() - workStart;
+    this._workMs = this._workMs ? this._workMs * 0.9 + workMs * 0.1 : workMs;
+    const q = qualityStep(this._quality.tier, this._workMs, dt * 1000, this._quality);
+    this._quality = q;
+    if (q.changed) this._applyQualityTier(q.tier);
   }
 
   _update(dt) {

@@ -246,6 +246,141 @@ if (!moduleMatch) {
   const requiredVendor = /\/vendor\/three\.module\.js'[\s\S]{0,220}?required:\s*true/.test(server);
   if (requiredVendor) pass('the vendored three.js route is marked required, so it fails loudly instead of 404ing');
   else fail('the /vendor/three.module.js route is not marked required -- a missing copy would 404 silently');
+
+  /* ------------------------------------------------------ 7. pointer lock --
+     An unlocked pointer does not stay in the window: on a multi-monitor desk
+     it walks onto the next screen the moment the player turns left. Pointer
+     lock is the only thing that prevents that, and it fails in several
+     distinct ways that all look identical from inside the game. Each contract
+     below guards one of them:
+
+       * release -- without a deliberate way out, the only escape is alt-tab
+       * relock  -- the click that should take the pointer back lands on the
+                    pause overlay, which covers the canvas: a canvas-only
+                    listener would never fire, so the path must be on window
+       * retry   -- a browser refuses a re-lock for a moment after Escape; with
+                    no retry the player is simply stuck with a free cursor
+       * screens -- after Escape the START screen must not come back, or the
+                    player thinks the match was lost
+  */
+  console.log('\npointer lock');
+  if (/e\.button === 1[\s\S]{0,160}?hooks\.onMiddleDown/.test(code)) {
+    pass('the middle button is routed to a deliberate release');
+  } else {
+    fail('the canvas does not route the middle button to a release hook');
+  }
+  if (/_releaseLock\(\)[\s\S]{0,140}?document\.exitPointerLock\(\)/.test(code)) {
+    pass('the middle click calls document.exitPointerLock()');
+  } else {
+    fail('nothing calls document.exitPointerLock() -- the cursor would be stuck in the game');
+  }
+  if (/window\.addEventListener\('mousedown',[\s\S]{0,460}?hooks\.onUnlockedClick/.test(code)) {
+    pass('clicking while unlocked takes the pointer back (window-level, over the pause overlay)');
+  } else {
+    fail('no window-level click path re-locks: the pause overlay covers the canvas, so a canvas listener never sees it');
+  }
+  if (/relockRetryMs:\s*\[/.test(code) && /relockDelay\(/.test(code)) {
+    pass('a refused lock request is retried on a bounded schedule');
+  } else {
+    fail('a refused lock request is never retried -- Escape then click leaves the player unlocked');
+  }
+  if (/window\.self !== window\.top/.test(code)) {
+    pass('an embedded page names the frame as the likely cause, with a way out of it');
+  } else {
+    fail('the client cannot tell an embedded frame apart from a plain refusal');
+  }
+  if (/_onLockError\(\)[\s\S]{0,320}?this\.paused\.hidden = false/.test(code)) {
+    pass('a refusal after deploy moves to the pause screen, where the reason is written');
+  } else {
+    fail('a first-deploy refusal leaves the start screen up, so the reason is never read');
+  }
+  if (/this\.overlay\.hidden = locked \|\| this\.deployed/.test(code)) {
+    pass('the start screen does not come back once the match has begun');
+  } else {
+    fail('losing the lock shows the start screen again, as if the match had been lost');
+  }
+
+  /* --------------------------------------------------- 8. friends / room --
+     Multiplayer is the room the page itself was served from, so the invite is
+     just this URL. For a friend to actually get in, two things must hold: the
+     client dials the origin it was served from rather than a hard-coded host,
+     and the address it tells the player to share is read from that same
+     location, so the two can never disagree. */
+  console.log('\ninvite + room');
+  if (/location\.protocol === 'https:' \? 'wss:' : 'ws:'[\s\S]{0,60}?location\.host/.test(code)) {
+    pass('the socket dials the origin the page was served from, not a hard-coded host');
+  } else {
+    fail('resolveEndpoint() does not derive the socket from location.host');
+  }
+  if (/const join = location\.href/.test(code) && /share-url-2/.test(code)) {
+    pass('the invite address shown to the player is the live page URL');
+  } else {
+    fail('the invite line is not filled from location');
+  }
+  if (/navigator\.clipboard\.writeText\(join\)/.test(code)) {
+    pass('the invite link can be copied, with a visible failure if the clipboard is denied');
+  } else {
+    fail('the copy control is not wired to the invite address');
+  }
+  if (/_updateRoomCount\(\)/.test(code) && /room-count-2/.test(code)) {
+    pass('the room count is shown and refreshed from the live roster');
+  } else {
+    fail('the room count is not wired to the roster');
+  }
+  if (/this\.net\.connect\(\)/.test(code) && /net\.on\('welcome'/.test(code)) {
+    pass('the client joins the shared room at boot (no opt-in step to miss)');
+  } else {
+    fail('the client does not connect to the relay on its own');
+  }
+
+  /* ------------------------------------------------- 9. frame budget ------
+     Lag is the least forgiving property of a shooter, and the two things that
+     cost this scene a frame are fill rate and the shadow pass. The contracts
+     here are what makes the client spend its budget on frames instead of
+     pixels: a capped buffer, a stepper that reacts to its own measurements,
+     and a measurement that reads the same on any refresh rate. */
+  console.log('\nframe budget');
+  const tiers = [...code.matchAll(/\{\s*ratio:\s*([\d.]+),\s*shadows:\s*(true|false)\s*\}/g)]
+    .map((m) => ({ ratio: Number(m[1]), shadows: m[2] === 'true' }));
+  if (tiers.length >= 3) pass(`quality adapts over ${tiers.length} resolution tiers`);
+  else fail(`the quality tier table is missing or too short to adapt (${tiers.length})`);
+
+  if (tiers.every((t, i) => i === 0 || t.ratio <= tiers[i - 1].ratio)) {
+    pass('tier resolutions are ordered best-first');
+  } else {
+    fail('the tier table is not ordered best-first');
+  }
+
+  if (tiers.length && tiers[0].ratio <= 1.5) {
+    pass(`the best tier caps the buffer at ${tiers[0].ratio}x, so a 2-3x retina buffer is never rendered`);
+  } else {
+    fail('the top tier renders more pixels than the fill-rate budget allows');
+  }
+
+  if (tiers.every((t, i) => t.shadows || i === tiers.length - 1)) {
+    pass('the shadow pass is only dropped at the last-resort tier');
+  } else {
+    fail('shadows are switched off before the resolution tiers are exhausted');
+  }
+
+  if (/antialias: deviceRatio <= 1\.25/.test(code) && /setPixelRatio\(Math\.min\(deviceRatio, QUALITY_TIERS\[0\]\.ratio\)\)/.test(code)) {
+    pass('multisampling is skipped where the buffer is already supersampled');
+  } else {
+    fail('the renderer is created without the high-DPI fill-rate guards');
+  }
+
+  const measuresWork = /const workStart = performance\.now\(\)[\s\S]{0,900}?const workMs = performance\.now\(\) - workStart/.test(code);
+  if (measuresWork) {
+    pass('the frame measures its own work, excluding the wait for the display refresh');
+  } else {
+    fail('frame work is not measured, so a smooth 60 Hz frame would read as late');
+  }
+
+  if (/qualityStep\(this\._quality\.tier, this\._workMs/.test(code) && /_applyQualityTier\(q\.tier\)/.test(code)) {
+    pass('the frame loop feeds its measurement through the quality policy');
+  } else {
+    fail('the quality policy is never applied from the frame loop');
+  }
 }
 
 console.log(failed === 0 ? '\nclient checks passed' : `\n${failed} client check(s) failed`);

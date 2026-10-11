@@ -134,6 +134,19 @@ async function main() {
       html.startsWith('<!DOCTYPE html>') && html.includes('id="hud"'),
       `len=${html.length}`
     );
+    /*
+     * The page a friend loads IS the lobby, so the invite affordances have to
+     * be in the bytes the relay actually serves -- present in index.html is not
+     * the same as present on the wire. These are the three things a second
+     * player needs: the address to open, a way to hand it over, and the fact
+     * that the room they are joining is already counted.
+     */
+    check('the served page carries the invite address for friends',
+      html.includes('id="share-url"') && html.includes('id="share-url-2"'));
+    check('the served page carries the copy control and the room counter',
+      html.includes('id="copy-link"') && html.includes('id="room-count"'));
+    check('the served page states how to release the pointer',
+      /middle click/i.test(html) && html.includes('id="lock-note"'));
     const health = await fetch(`${BASE}/health`);
     check('GET /health -> ok', health.status === 200 && (await health.json()).ok === true);
     /*

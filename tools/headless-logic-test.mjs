@@ -60,14 +60,42 @@ function makeCtx() {
     getImageData: () => ({ data: new Uint8ClampedArray(4) }),
   };
 }
-globalThis.document = {
-  createElement: (tag) => ({ tagName: tag, width: 1, height: 1, style: {}, getContext: () => makeCtx() }),
+/*
+ * A real (tiny) event registry instead of a no-op addEventListener. The input
+ * layer is wiring, and whether a click actually reaches the right hook -- and
+ * only once -- is not something static inspection can prove. Dispatch is
+ * explicit, so nothing else in the module changes behaviour.
+ */
+function makeEventTarget(extra = {}) {
+  const listeners = new Map();
+  return {
+    ...extra,
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const list = listeners.get(type);
+      if (list) listeners.set(type, list.filter((f) => f !== fn));
+    },
+    /** Fire `type` at this target with a synthetic, minimal event object. */
+    dispatch(type, event = {}) {
+      const e = { type, preventDefault() {}, stopPropagation() {}, ...event };
+      for (const fn of (listeners.get(type) || []).slice()) fn(e);
+      return e;
+    },
+  };
+}
+
+const fakeCanvas = () => ({ tagName: 'canvas', width: 1, height: 1, style: {}, getContext: () => makeCtx() });
+
+globalThis.document = makeEventTarget({
+  createElement: (tag) => ({ ...fakeCanvas(), tagName: tag }),
   getElementById: () => null,
   querySelector: () => null,
-  addEventListener() {},
   body: { appendChild() {} },
-};
-globalThis.window = { addEventListener() {}, innerWidth: 1280, innerHeight: 720, devicePixelRatio: 1 };
+});
+globalThis.window = makeEventTarget({ innerWidth: 1280, innerHeight: 720, devicePixelRatio: 1 });
 globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 globalThis.requestAnimationFrame = () => 0;
 
@@ -103,7 +131,8 @@ if (/\.\/vendor\/three\.module\.js/.test(source) || /from\s+'three'/.test(source
   process.exit(1);
 }
 source += `\nexport { CFG, Level, LocalPlayer, SmokeCloud, Weapon, RemotePlayer, Game, Input,
-  Objective, WEAPONS, SLOT_ORDER, TracerPool, DecalPool, ImpactPool, clamp, lerp, hashInt };\n`;
+  Objective, WEAPONS, SLOT_ORDER, TracerPool, DecalPool, ImpactPool, clamp, lerp, hashInt,
+  relockDelay, qualityStep, QUALITY_TIERS };\n`;
 
 const dir = await mkdtemp(path.join(os.tmpdir(), 'csb-logic-'));
 const file = path.join(dir, 'client.mjs');
@@ -112,6 +141,7 @@ await writeFile(file, source, 'utf8');
 const mod = await import(pathToFileURL(file).href);
 const {
   CFG, Level, LocalPlayer, SmokeCloud, Objective, clamp, lerp, hashInt, WEAPONS, SLOT_ORDER, Input,
+  relockDelay, qualityStep, QUALITY_TIERS,
 } = mod;
 const THREE = await import(threeUrl);
 
@@ -593,6 +623,144 @@ console.log('\nboot watchdog');
 }
 
 /* --------------------------------------------------- 12. match objective -- */
+/* ------------------------------------------------------------ pointer lock --
+   An unlocked pointer walks off to the next monitor, so the retry schedule is
+   the difference between playing and not. It is pure, so it can be checked
+   here frame-free: the first attempt must be immediate (the player feels
+   nothing), later ones walk past a browser's post-Escape refusal window, and
+   the tail is bounded so a hopeless request cannot spin forever. */
+/* ------------------------------------------------------- input wiring --
+   The reported symptom was the cursor leaving the window on a multi-monitor
+   desk, which is what an unlocked pointer does. The policy above decides when
+   to ask; this is whether the asking is wired to the right button -- and, just
+   as important, only once. A browser bubbles a canvas click up to the window,
+   so the two handlers below must not both answer it. */
+console.log('\ninput wiring: middle click releases, left click re-locks');
+const input = new Input();
+const canvasTarget = makeEventTarget({ tagName: 'canvas' });
+const seen = { middle: 0, unlocked: 0, fire: 0, alt: 0 };
+input.attach(canvasTarget, {
+  onMiddleDown: () => seen.middle++,
+  onUnlockedClick: () => seen.unlocked++,
+  onFire: () => seen.fire++,
+  onAltFire: () => seen.alt++,
+});
+
+canvasTarget.dispatch('mousedown', { button: 1, target: canvasTarget });
+check('a middle click reaches the release hook', seen.middle === 1, `${seen.middle} calls`);
+check('the middle button is not turned into a shot', input.mouse.down === false && seen.fire === 0);
+check('the middle button is not mistaken for a re-lock request', seen.unlocked === 0);
+
+canvasTarget.dispatch('mousedown', { button: 0, target: canvasTarget });
+check('the canvas itself never re-locks: the pause overlay covers it',
+  seen.unlocked === 0, `${seen.unlocked} calls`);
+window.dispatch('mousedown', { button: 0, target: canvasTarget });
+check('the same click, as the browser bubbles it, re-locks exactly once',
+  seen.unlocked === 1, `${seen.unlocked} calls`);
+
+window.dispatch('mousedown', {
+  button: 0,
+  target: { closest: (sel) => (sel.includes('button') ? {} : null) },
+});
+check('a click on a real control is not hijacked into a lock request', seen.unlocked === 1);
+
+input.locked = true;   // exactly what the pointerlockchange handler sets
+window.dispatch('mousedown', { button: 0, target: canvasTarget });
+check('a left click while locked does not ask for the lock again', seen.unlocked === 1);
+canvasTarget.dispatch('mousedown', { button: 0, target: canvasTarget });
+check('a left click while locked fires the weapon', seen.fire === 1 && input.mouse.down === true);
+canvasTarget.dispatch('mousedown', { button: 2, target: canvasTarget });
+check('the right button still routes to alt-fire', seen.alt === 1);
+window.dispatch('mouseup', { button: 0 });
+check('releasing the left button ends the automatic-fire hold', input.mouse.down === false);
+
+input.locked = false;
+document.dispatch('mousemove', { movementX: 12, movementY: -6 });
+check('mouse motion is ignored while the pointer is unlocked',
+  input.consumeMouse().dx === 0, 'a free cursor must not aim the camera');
+input.locked = true;
+document.dispatch('mousemove', { movementX: 12, movementY: -6 });
+document.dispatch('mousemove', { movementX: 3, movementY: 1 });
+const moved = input.consumeMouse();
+check('while locked, motion accumulates and is consumed exactly once',
+  moved.dx === 15 && moved.dy === -5 && input.consumeMouse().dx === 0,
+  `got ${moved.dx},${moved.dy}`);
+
+console.log('\npointer lock policy');
+check('the first lock attempt is not delayed', relockDelay(0) === 0);
+check('every delay is a usable number of milliseconds',
+  CFG.relockRetryMs.every((ms) => Number.isFinite(ms) && ms >= 0));
+check('the schedule never shrinks as attempts pile up',
+  CFG.relockRetryMs.every((ms, i) => i === 0 || ms >= CFG.relockRetryMs[i - 1]));
+const budget = CFG.relockRetryMs.reduce((a, b) => a + b, 0);
+check('the retry budget outlasts a browser\u2019s post-Escape refusal window',
+  budget >= 1200, `${budget}ms across ${CFG.relockRetryMs.length} attempts`);
+check('attempts past the end of the schedule reuse its last delay',
+  relockDelay(99) === CFG.relockRetryMs[CFG.relockRetryMs.length - 1]);
+
+/* --------------------------------------------------------- adaptive quality --
+   The tier table is what actually spends the frame budget, and the policy is
+   the part that decides when to move. Driving it frame by frame here is the
+   only way to know it settles: it has to reach the floor under load, climb
+   back with headroom, ignore a single spike, and -- the one that matters --
+   never oscillate, because each step reallocates the drawing buffer. */
+console.log('\nadaptive quality');
+check('tier resolutions never increase down the table',
+  QUALITY_TIERS.every((t, i) => i === 0 || t.ratio <= QUALITY_TIERS[i - 1].ratio));
+check('every tier renders a usable buffer', QUALITY_TIERS.every((t) => t.ratio >= 0.5),
+  QUALITY_TIERS.map((t) => `${t.ratio}x`).join(' > '));
+check('shadows survive until the last-resort tier',
+  QUALITY_TIERS.every((t, i) => t.shadows || i === QUALITY_TIERS.length - 1));
+
+const FRAME = 1000 / 60;
+/** Drive the policy exactly as the frame loop does: state in, state out. */
+function runQuality(startTier, workMs, frames, hitch = null) {
+  let acc = { tier: startTier, slowFor: 0, fastFor: 0, sinceStep: CFG.qualityCooldownMs };
+  const changes = [];
+  for (let i = 0; i < frames; i++) {
+    const ms = hitch && i === hitch.at ? hitch.ms : workMs;
+    acc = qualityStep(acc.tier, ms, FRAME, acc);
+    if (acc.changed) changes.push({ frame: i, tier: acc.tier });
+  }
+  return { tier: acc.tier, changes };
+}
+
+const heavy = runQuality(0, 30, 900);
+check('sustained late frames step the resolution down to the floor',
+  heavy.tier === QUALITY_TIERS.length - 1,
+  `ended at tier ${heavy.tier} of ${QUALITY_TIERS.length - 1}`);
+check('stepping down stops at the last tier',
+  heavy.changes.length === QUALITY_TIERS.length - 1, `${heavy.changes.length} steps`);
+check('a step needs a full evidence window, not one bad frame',
+  heavy.changes[0].frame * FRAME >= CFG.qualityHoldMs,
+  `first step after ${(heavy.changes[0].frame * FRAME).toFixed(0)}ms`);
+const gaps = heavy.changes.slice(1).map((c, i) => (c.frame - heavy.changes[i].frame) * FRAME);
+check('at most one quality step per cooldown window',
+  gaps.every((g) => g >= CFG.qualityCooldownMs - 1e-6),
+  `gaps ${gaps.map((g) => g.toFixed(0)).join(', ')}ms`);
+
+const light = runQuality(QUALITY_TIERS.length - 1, 2, 1200);
+check('with headroom the resolution climbs back to the best tier', light.tier === 0);
+check('climbing back is slower than stepping down',
+  light.changes[0].frame > heavy.changes[0].frame,
+  `${light.changes[0].frame} vs ${heavy.changes[0].frame} frames`);
+
+const hitchy = runQuality(0, 4, 600, { at: 300, ms: 45 });
+check('a single spike never moves the resolution',
+  hitchy.tier === 0 && hitchy.changes.length === 0, `${hitchy.changes.length} steps`);
+
+let mixed = { tier: 0, slowFor: 0, fastFor: 0, sinceStep: CFG.qualityCooldownMs };
+for (let i = 0; i < 600; i++) mixed = qualityStep(mixed.tier, i % 2 ? 2 : 30, FRAME, mixed);
+check('alternating load and idle is not mistaken for headroom', mixed.tier === 0);
+
+const acc0 = { tier: 1, slowFor: 0, fastFor: 0, sinceStep: 0 };
+const stepA = qualityStep(acc0.tier, 20, FRAME, acc0);
+const stepB = qualityStep(acc0.tier, 20, FRAME, acc0);
+check('the policy holds no state of its own and never mutates its input',
+  JSON.stringify(stepA) === JSON.stringify(stepB) && acc0.slowFor === 0 && acc0.sinceStep === 0);
+check('the returned accumulator feeds straight back in, as the loop uses it',
+  Number.isFinite(qualityStep(stepA.tier, 20, FRAME, stepA).sinceStep));
+
 console.log('\nobjective: bomb defusal');
 {
   const o = new Objective(scene, level);

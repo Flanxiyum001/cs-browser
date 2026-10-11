@@ -213,7 +213,67 @@ compares the two copies and fails the build if they ever drift apart.
 | `1` `2` `3` `4` `5` | rifle · pistol · knife · smoke · flashbang |
 | hold `Tab` | scoreboard (incl. round state) |
 | hold `E` | plant the bomb inside a site / defuse the armed bomb |
-| `Esc` | release the pointer (pause) |
+| middle click / `Esc` | release the pointer (pause) — then click anywhere to take it back |
+
+---
+
+## Playing with friends
+
+There is no lobby, no code and no host setup, because the relay that served the
+page **is** the room: a friend who opens the same URL is in the same match. The
+start and pause screens show the address to hand over, a button to copy it, and
+how many operatives are in the room right now.
+
+* Same origin means same match — a deployed Railway URL, a LAN address or a
+  forwarded port all work equally.
+* `?server=ws://host:port/` points the client at a *different* relay than the one
+  serving the page, which is what the split deploy option below uses.
+* Everyone sees the same roster, scoreboard, round clock and bomb state, and the
+  relay — not the shooter — validates plants and defuses. See
+  [Wire protocol](#wire-protocol).
+
+---
+
+## The cursor, and the frame budget
+
+**The cursor is not allowed to leave the window.** On a multi-monitor desk an
+unlocked pointer walks onto the next screen the moment you turn left, so pointer
+lock is treated as part of the controls rather than as a nicety:
+
+* **click anywhere**, or `resume`, takes the pointer back. That listener is on the
+  window, not the canvas: the pause overlay covers the canvas, so a canvas
+  listener would never see the click.
+* **middle click** releases it deliberately, and so does `Esc`, which the browser
+  owns and no page can intercept.
+* a **refused request is retried** on a bounded schedule (`relockRetryMs`). The
+  most common refusal is a browser declining a re-lock for a moment right after
+  `Esc` — a legal request made too early — and without the retry the player is
+  simply stuck with a free cursor.
+* when it keeps failing, the pause screen **names the cause** instead of going
+  quiet. A page embedded in a frame can be refused pointer lock outright
+  (permissions policy, or a sandboxed iframe), and from inside the game that is
+  indistinguishable from a broken build, so the client detects the frame and
+  offers to open itself in its own tab.
+
+**Lag is spent on frames, not pixels.** The loop measures its own work —
+simulation plus both render passes, which excludes the idle wait for the display
+refresh, so the budget reads the same at 60 Hz and at 240 Hz — and moves through
+four quality tiers:
+
+| tier | drawing buffer | shadows |
+| --- | --- | --- |
+| 0 | min(devicePixelRatio, 1.5) | yes |
+| 1 | 1.25 | yes |
+| 2 | 1.0 | yes |
+| 3 | 0.75 | no |
+
+Resolution is the dial that moves because it is the only one that can change
+without recompiling a shader; the shadow pass is dropped only at the last tier
+for the same reason. Stepping down takes 900 ms of late frames; stepping back up
+takes three times that, so a quiet moment between two firefights is not mistaken
+for headroom. At most one step per 2.5 s, so the resolution can never chase the
+load it is measuring. `antialias` is skipped where the buffer is already
+supersampled, and the canvas is created without alpha or a read-back buffer.
 
 ---
 
@@ -298,7 +358,15 @@ Three harnesses, each independent of the others:
 npm run check
 ```
 
-* **`tools/check-client.mjs`** — static analysis of `index.html`. Asserts the
+* **`tools/check-client.mjs`** — static analysis of `index.html`. It holds the
+  behaviours a player notices immediately: that the pointer is released by the
+  middle button, re-acquired by a click that lands on the pause overlay (a
+  window-level listener, because the overlay covers the canvas), retried when
+  the browser refuses, and reported honestly when it cannot be granted at all;
+  that the invite line is filled from `location` — the same origin the socket
+  dials — so a friend who opens the page really is in the room; and that the
+  quality tier table is ordered best-first, capped at 1.5x, and wired into the
+  loop. Beyond that it asserts the
   engine's `import` is a literal URL (a relative path, or a CDN) rather than a
   bare specifier that would need import-map support, resolves to a path
   `server.js` actually serves, parses the inline
@@ -324,8 +392,14 @@ npm run check
   produce no message at all), and the objective: site hits
   and misses, the round packet, the hold-to-plant / hold-to-defuse channels
   (including that releasing early or standing outside the zone sends nothing),
-  and the armed bomb's blink. Nothing is reimplemented, so a regression in
-  `index.html` fails here instead of silently passing against a stale copy.
+  and the armed bomb's blink. It also drives the pointer-lock and quality
+  policies frame by frame (the retry schedule's bounds; the stepper settling on
+  the floor under load, climbing back with headroom, ignoring a single spike and
+  never oscillating) and the input wiring itself, under a small event registry:
+  a middle click reaches the release hook, a click is answered exactly once even
+  though the browser bubbles it, and mouse motion is ignored while the pointer is
+  unlocked. Nothing is reimplemented, so a regression in `index.html` fails here
+  instead of silently passing against a stale copy.
 
 * **`tools/smoke-test.mjs`** — boots the relay on an isolated port and drives two
   real WebSocket clients through the entire protocol: id allocation and
@@ -340,7 +414,10 @@ npm run check
   and a late joiner is handed the live round state on arrival. It also checks
   the static host serves the game shell and the vendored three.js build — status,
   `text/javascript` content-type, `nosniff`, and that the bytes are the real
-  library rather than an HTML error page — then tears the child down.
+  library rather than an HTML error page — and that the *served* page carries the
+  things a second player needs on the wire: the invite address, the copy control,
+  the room counter and the stated way to release the pointer. Then it tears the
+  child down.
 
 ---
 
