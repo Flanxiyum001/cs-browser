@@ -69,6 +69,18 @@ jobs:
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
       RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
+      # Optional, consumed by the running service rather than by the workflow:
+      # RAILWAY_PRIVATE_DOMAIN  - private DNS name of the service
+      # RAILWAY_PROJECT_NAME    - project the service belongs to
+      # RAILWAY_ENVIRONMENT_NAME - environment instance name
+      # RAILWAY_SERVICE_NAME    - the service name
+      # These are NOT repo secrets: the workflow does not read them, they are
+      # pushed into the environment the service runs in, so Railway sets them
+      # from its project, environment, and service pages and the app sees them.
+      RAILWAY_PRIVATE_DOMAIN: ${{ vars.RAILWAY_PRIVATE_DOMAIN }}
+      RAILWAY_PROJECT_NAME: ${{ vars.RAILWAY_PROJECT_NAME }}
+      RAILWAY_ENVIRONMENT_NAME: ${{ vars.RAILWAY_ENVIRONMENT_NAME }}
+      RAILWAY_SERVICE_NAME: ${{ vars.RAILWAY_SERVICE_NAME }}
     steps:
       - uses: actions/checkout@v4
 
