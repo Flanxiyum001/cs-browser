@@ -108,13 +108,17 @@ jobs:
           [ -n "$RAILWAY_SERVICE_ID" ] || { echo "::error::missing repository variable RAILWAY_SERVICE_ID"; missing=1; }
           exit $missing
 
-      # A CI run is not interactive, so the target has to be explicit: without
-      # this, `railway up` has nothing to attach the upload to.
-      - name: Link the project and environment
-        run: railway link --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT_ID"
-
-      # Attached mode: the step fails if the build fails. If a future CLI
-      # version tails runtime logs here, add --detach to return after the
-      # upload instead of waiting on the service.
-      - name: Deploy
-        run: railway up --service "$RAILWAY_SERVICE_ID"
+      # Railway authenticates uploads with the RAILWAY_TOKEN it finds in the
+      # environment of this step. We do not `railway link` here: in an automated
+      # run, `railway up` takes the project, environment and service directly
+      # from the flags below, and the token it reads from this step's environment.
+      # (Freebuff exposes that token as the secret RAILWAY_TOKEN.)
+      - name: Deploy Production Engine to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway up \
+            --project "${{ variables.RAILWAY_PROJECT_ID }}" \
+            --environment "${{ variables.RAILWAY_ENVIRONMENT_ID }}" \
+            --service "${{ variables.RAILWAY_SERVICE_ID }}" \
+            --detach
