@@ -1,8 +1,8 @@
 {
   // This project ships plain JavaScript (a Node relay plus a single self-contained
-  // HTML/Three.js client), but Freebuff's post-turn gate runs `tsc -b --noEmit`.
-  // This config satisfies that gate and still surfaces JS *syntax* errors, while
-  // leaving full semantic checking off because the client is authored in JS.
+  // HTML/Three.js client). `tsc -b --noEmit` is the typecheck the CI workflow and
+  // the local check scripts run; this config lets it surface JS *syntax* errors
+  // while leaving full semantic checking off, because the client is authored in JS.
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",

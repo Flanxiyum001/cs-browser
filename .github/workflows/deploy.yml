@@ -111,8 +111,8 @@ jobs:
       # Railway authenticates uploads with the RAILWAY_TOKEN it finds in the
       # environment of this step. We do not `railway link` here: in an automated
       # run, `railway up` takes the project, environment and service directly
-      # from the flags below, and the token it reads from this step's environment.
-      # (Freebuff exposes that token as the secret RAILWAY_TOKEN.)
+      # from the flags below, and authenticates with the RAILWAY_TOKEN secret
+      # declared on this step.
       - name: Deploy Production Engine to Railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
