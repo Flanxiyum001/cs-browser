@@ -118,7 +118,7 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           railway up \
-            --project "${{ variables.RAILWAY_PROJECT_ID }}" \
-            --environment "${{ variables.RAILWAY_ENVIRONMENT_ID }}" \
-            --service "${{ variables.RAILWAY_SERVICE_ID }}" \
+            --project "${{ vars.RAILWAY_PROJECT_ID }}" \
+            --environment "${{ vars.RAILWAY_ENVIRONMENT_ID }}" \
+            --service "${{ vars.RAILWAY_SERVICE_ID }}" \
             --detach

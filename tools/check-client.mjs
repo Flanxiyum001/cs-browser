@@ -381,6 +381,35 @@ if (!moduleMatch) {
   } else {
     fail('the quality policy is never applied from the frame loop');
   }
+
+  /* ------------------------------------------------ 10. deploy workflow --
+     The workflow is what puts this build in front of other players, and it
+     fails in the quietest way possible: one context GitHub does not define and
+     the whole file is refused, so the run dies in under a second with "workflow
+     file issue" before a single job starts. Nothing else here would notice,
+     because the file is perfectly valid YAML -- which is precisely why the
+     expressions are checked against the set GitHub actually defines. */
+  console.log('\ndeploy workflow');
+  const workflow = await readFile(path.join(ROOT, '.github/workflows/deploy.yml'), 'utf8');
+  const CONTEXTS = new Set([
+    'github', 'secrets', 'vars', 'env', 'inputs', 'steps', 'needs', 'matrix',
+    'strategy', 'job', 'jobs', 'runner', 'always', 'success', 'failure', 'cancelled',
+  ]);
+  const expressions = [...workflow.matchAll(/\$\{\{([^}]*)\}\}/g)].map((m) => m[1].trim());
+  const contexts = [...new Set(expressions.map((e) => (e.match(/^([a-z_]+)\./) || [])[1]).filter(Boolean))];
+  const unknown = contexts.filter((c) => !CONTEXTS.has(c));
+  if (!expressions.length) {
+    fail('the deploy workflow uses no expressions at all -- is this the right file?');
+  } else if (unknown.length) {
+    fail(`deploy.yml uses contexts GitHub does not define (${unknown.join(', ')}): the run fails before any job starts`);
+  } else {
+    pass(`all ${expressions.length} workflow expressions use real contexts (${contexts.sort().join(', ')})`);
+  }
+  if (/bun run check/.test(workflow) && /bun tsc -b --noEmit/.test(workflow)) {
+    pass('the same battery runs in CI before anything deploys');
+  } else {
+    fail('CI does not run the typecheck and harness battery this file checks');
+  }
 }
 
 console.log(failed === 0 ? '\nclient checks passed' : `\n${failed} client check(s) failed`);
