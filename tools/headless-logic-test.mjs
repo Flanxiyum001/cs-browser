@@ -86,8 +86,22 @@ if (cut < 0) {
   process.exit(1);
 }
 
-const threeUrl = pathToFileURL(path.join(ROOT, 'node_modules/three/build/three.module.js')).href;
-let source = moduleMatch[1].slice(0, cut).replace("from 'three'", `from '${threeUrl}'`);
+/*
+ * Import the SAME three.js the browser loads: the copy committed in vendor/,
+ * which is what server.js serves. That way this harness cannot quietly test
+ * against a different build than the one that ships.
+ */
+const threeUrl = pathToFileURL(path.join(ROOT, 'vendor/three.module.js')).href;
+let source = moduleMatch[1]
+  .slice(0, cut)
+  .replace(/from\s+'(?:\.\/vendor\/three\.module\.js|three)'/, `from '${threeUrl}'`);
+
+// If the client's import specifier ever changes again, fail here rather than
+// test a module whose dependency silently resolved to something else.
+if (/\.\/vendor\/three\.module\.js/.test(source) || /from\s+'three'/.test(source)) {
+  console.error('could not rewrite the three.js import; refusing to test a different build');
+  process.exit(1);
+}
 source += `\nexport { CFG, Level, LocalPlayer, SmokeCloud, Weapon, RemotePlayer, Game, Input,
   Objective, WEAPONS, SLOT_ORDER, TracerPool, DecalPool, ImpactPool, clamp, lerp, hashInt };\n`;
 
@@ -486,6 +500,96 @@ console.log('\nremote player interpolation');
   check('a downed body stops moving', rp.group.position.distanceTo(before) < 1e-6);
   check('a downed body tips over', rp.group.rotation.x > 1.2, `rx=${rp.group.rotation.x.toFixed(2)}`);
   check('hitboxes stay well formed while alive', rp.boxUpper.max.y > rp.boxUpper.min.y);
+}
+
+/* ---------------------------------------------------- 11b. boot watchdog --
+   The classic script that sits outside the module. When the module never runs
+   it is the ONLY thing on the page that can explain why, so its message is a
+   user-facing deliverable and gets tested here rather than eyeballed in a
+   browser: given a fetch that 404s, it must say 404, not "check the console". */
+console.log('\nboot watchdog');
+{
+  const watchdogHtml = html.match(/<script>([\s\S]*?)<\/script>/);
+  check('the page ships a classic boot watchdog outside the module', !!watchdogHtml);
+
+  if (watchdogHtml) {
+    const src = watchdogHtml[1];
+    const mkRes = (status, type, body) => ({
+      status,
+      headers: { get: () => type },
+      text: async () => body,
+    });
+
+    /** Run the watchdog with stubs and return a way to fire its timer / events. */
+    const boot = ({ game, moduleRan, res, reject } = {}) => {
+      const el = { hidden: true, innerHTML: '' };
+      const listeners = {};
+      const win = { addEventListener: (t, fn) => { listeners[t] = fn; } };
+      if (game) win.__game = {};
+      if (moduleRan) win.__engineModuleRan = true;
+      let timer = null;
+      const fetchStub = async () => {
+        if (reject) throw new Error('network down');
+        return res;
+      };
+      new Function('window', 'document', 'fetch', 'setTimeout', src)(
+        win, { getElementById: () => el }, fetchStub, (fn) => { timer = fn; }
+      );
+      return { el, listeners, fire: () => timer && timer(), settle: () => new Promise((r) => setImmediate(r)) };
+    };
+
+    // 1. a booted engine says nothing at all
+    {
+      const t = boot({ game: true });
+      t.fire();
+      await t.settle();
+      check('a booted engine produces no message (no false alarm)', t.el.hidden === true && t.el.innerHTML === '');
+    }
+
+    // 2. the case the player actually hit: the module never ran and the asset 404s
+    {
+      const t = boot({
+        moduleRan: false,
+        res: mkRes(404, 'text/html; charset=utf-8', '<h1>404 not found</h1>'),
+      });
+      t.fire();
+      await t.settle();
+      const msg = t.el.innerHTML;
+      check('a 404 on the module is reported with its real status', /404/.test(msg), msg.slice(0, 120));
+      check('the report names the URL the browser was asked for', /vendor\/three\.module\.js/.test(msg));
+      check('an HTML body is called out as HTML, not JavaScript', /HTML, not JavaScript/.test(msg));
+      check('the report distinguishes "never ran" from "ran and threw"', /module body never ran/.test(msg));
+    }
+
+    // 3. the module ran, so the asset was fine and the failure is elsewhere
+    {
+      const t = boot({
+        moduleRan: true,
+        res: mkRes(200, 'text/javascript; charset=utf-8', 'const REVISION = "169";'),
+      });
+      t.fire();
+      await t.settle();
+      check('a served module shifts the diagnosis to the engine itself',
+        /module body ran but the engine did not start/.test(t.el.innerHTML), t.el.innerHTML.slice(0, 140));
+    }
+
+    // 4. a resource-level failure is caught immediately, without waiting
+    {
+      const t = boot({});
+      t.listeners.error({ target: { tagName: 'SCRIPT', src: '/vendor/three.module.js' } });
+      check('a resource load failure is reported the moment it happens',
+        t.el.hidden === false && /vendor\/three\.module\.js/.test(t.el.innerHTML));
+    }
+
+    // 5. an unreachable server cannot produce an unhandled rejection
+    {
+      const t = boot({ reject: true });
+      t.fire();
+      await t.settle();
+      check('a fetch that throws is still reported as a message',
+        /could not fetch/.test(t.el.innerHTML), t.el.innerHTML.slice(0, 120));
+    }
+  }
 }
 
 /* --------------------------------------------------- 12. match objective -- */

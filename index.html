@@ -11,31 +11,30 @@
   ===========================================================================
    THREE.JS MODULE RESOLUTION
   ---------------------------------------------------------------------------
-   The relay in server.js serves the pinned three.js build out of node_modules
-   at /vendor/three.module.js, so this page has zero third-party network calls
-   and works offline.
+   The engine imports the pinned three.js build by RELATIVE URL:
+
+     import * as THREE from './vendor/three.module.js';
+
+   A relative import is deliberate. The usual alternative is a bare specifier
+   ('three') resolved through a <script type="importmap">, but that makes the
+   entire page depend on the browser supporting import maps, on the import map
+   surviving whatever proxy or minifier rewrites the HTML, and on the mapped
+   absolute path being exactly right. Each of those failures looks identical
+   from the outside: the module never runs and the page shows nothing.
+
+   The relative URL needs none of that. It resolves against this document, and
+   either fetches a JavaScript module or reports an honest 404. server.js serves
+   that exact path, so the page has zero third-party network calls and works
+   with no install step.
 
    If you host THIS FILE somewhere else (GitHub Pages, Netlify, a CDN) and only
-   run server.js as the socket relay, point the import map at a CDN instead:
+   run server.js as the socket relay, change that one specifier to a CDN:
 
-     "three": "https://unpkg.com/three@0.169.0/build/three.module.js"
+     import * as THREE from 'https://unpkg.com/three@0.169.0/build/three.module.js';
 
    Nothing else in this file has to change.
   ===========================================================================
 -->
-<!-- The relay in server.js serves the pinned three.js build out of node_modules
-     at /vendor/three.module.js, so this page has zero third-party network
-     calls and works offline. The import map below is required for real
-     browsers: ES modules refuse to run when the browser does not see the
-     script as a module, and /vendor/three.module.js is served as
-     text/html (a directory listing), which is the 404/black-screen cause. -->
-<script type="importmap">
-{
-  "imports": {
-    "three": "/vendor/three.module.js"
-  }
-}
-</script>
 
 <style>
   /* =========================================================================
@@ -448,7 +447,7 @@
      BOOT WATCHDOG
      The engine below is an ES module. If the browser cannot fetch or parse it
      -- a 404 or a wrong content-type on /vendor/three.module.js, which is where
-     the import map sends the bare 'three' specifier -- then the module never
+     the engine's own import of ./vendor/three.module.js -- then the module never
      executes and nothing inside it can report why. This classic script stays
      alive in exactly that case, so a silent black boot screen becomes the real
      reason instead of a mystery.
@@ -456,28 +455,61 @@
 <script>
 (function () {
   var boot = document.getElementById('boot');
-  function fail(msg) {
-    if (!boot) return;
+  var VENDOR = './vendor/three.module.js';
+  var reported = false;
+
+  function show(title, detail) {
+    if (!boot || reported) return;
+    reported = true;                       // first, most specific reason wins
     boot.hidden = false;
     boot.innerHTML = '<div class="txt" style="max-width:64ch;text-align:center;line-height:1.9">' +
-      'engine failed to load &mdash; <b>' + msg + '</b></div>';
+      title + (detail ? ' <b>' + detail + '</b>' : '') + '</div>';
   }
-  // Resource-level failures do not reach the module's own try/catch.
+
+  /* Resource-level failures (a 404 on the module, a wrong content-type) never
+     reach the module's own try/catch, so they are caught here. */
   window.addEventListener('error', function (e) {
     var t = e && e.target;
     if (t && t !== window && (t.tagName === 'SCRIPT' || t.tagName === 'LINK')) {
-      fail('could not load ' + (t.src || t.href));
+      show('engine asset failed to load &mdash;', t.src || t.href);
+    } else if (e && e.message) {
+      show('engine error &mdash;', e.message + (e.filename ? ' (' + e.filename + ':' + (e.lineno || 0) + ')' : ''));
     }
   }, true);
+
   window.addEventListener('unhandledrejection', function (e) {
     var r = e && e.reason;
-    fail(String((r && (r.message || r)) || 'module rejected'));
+    show('engine rejected &mdash;', String((r && (r.message || r)) || 'unknown reason'));
   });
-  // If the module has not booted the engine by now, say so rather than sitting
-  // on the boot screen forever.
-  setTimeout(function () {
-    if (!window.__game) fail('the client module never ran &mdash; check the network tab for /vendor/three.module.js');
-  }, 8000);
+
+  /*
+   * Last resort, and the only case that used to be a dead end. If the engine
+   * still has not booted, go and ask the server what it is actually returning
+   * for the module instead of telling the player to go read the network tab.
+   * The distinction between "the module body never ran" (the import itself
+   * failed) and "it ran and threw" is what makes this message actionable.
+   */
+  function diagnose() {
+    if (window.__game) return;                              // it booted; say nothing
+    var ran = window.__engineModuleRan === true;
+    var where = ran ? 'module body ran but the engine did not start'
+                    : 'module body never ran';
+    fetch(VENDOR, { cache: 'no-store' })
+      .then(function (res) {
+        return res.text().then(function (body) {
+          var type = res.headers.get('content-type') || 'no content-type';
+          var isHtml = /^\s*</.test(body);
+          show('engine did not start &mdash;',
+            VENDOR + ' returned ' + res.status + ' ' + type +
+            (isHtml ? ' (HTML, not JavaScript)' : '') + '; ' + where);
+        });
+      })
+      .catch(function (err) {
+        show('engine did not start &mdash;',
+          'could not fetch ' + VENDOR + ' (' + (err && err.message ? err.message : err) + '); ' + where);
+      });
+  }
+  setTimeout(diagnose, 9000);
 })();
 </script>
 
@@ -487,7 +519,8 @@
      no build step, no third-party script tags.
      ========================================================================= -->
 <script type="module">
-import * as THREE from 'three';
+window.__engineModuleRan = true;   // read by the boot watchdog above
+import * as THREE from './vendor/three.module.js';
 
 /* ===========================================================================
    [ 1 ]  NETWORK CONFIG   <- THE ONLY THING YOU EDIT AFTER DEPLOYING

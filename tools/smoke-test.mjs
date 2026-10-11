@@ -137,7 +137,7 @@ async function main() {
     const health = await fetch(`${BASE}/health`);
     check('GET /health -> ok', health.status === 200 && (await health.json()).ok === true);
     /*
-     * The client's import map sends `three` here, so this one asset is the
+     * The client's import statement points here, so this one asset is the
      * difference between a playable page and a black screen with a failed
      * request in it. Check the three things a browser actually cares about:
      * the status, the content-type (a module served as text/html is refused),

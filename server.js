@@ -222,10 +222,11 @@ const STATIC_ROUTES = new Map([
    * it still serves on a read-only container filesystem.
    */
   /*
-   * The client's inline module does `import * as THREE from 'three'`, and the
-   * import map resolves that to this path. So this route is NOT optional: if it
-   * 404s, the browser refuses to run the page's module and the game sits on its
-   * boot screen forever with nothing in the console but a failed request.
+   * The client's inline module does
+   *   `import * as THREE from './vendor/three.module.js'`
+   * which resolves to this path. So this route is NOT optional: if it 404s, the
+   * browser refuses to run the page's module and the game sits on its boot
+   * screen forever with nothing in the console but a failed request.
    *
    * It is served from the copy committed in vendor/ first, which makes the
    * deploy independent of node_modules being installed at runtime, and only

@@ -133,10 +133,11 @@ Two things to remember in this mode:
 * Use `wss://`, not `ws://`. Browsers block insecure WebSockets from an
   `https://` page as mixed content.
 * `/vendor/three.module.js` is served by `server.js`. If you are not running it
-  in front of the client, point the import map in `index.html` at a CDN instead:
+  in front of the client, point the engine's own import at a CDN instead — one
+  line at the top of the module in `index.html`:
 
-  ```json
-  { "imports": { "three": "https://unpkg.com/three@0.169.0/build/three.module.js" } }
+  ```js
+  import * as THREE from 'https://unpkg.com/three@0.169.0/build/three.module.js';
   ```
 
 You can also point any build at a relay at runtime without editing the file, by
@@ -298,7 +299,9 @@ npm run check
 ```
 
 * **`tools/check-client.mjs`** — static analysis of `index.html`. Asserts the
-  import map resolves to the path `server.js` actually serves, parses the inline
+  engine's `import` is a literal URL (a relative path, or a CDN) rather than a
+  bare specifier that would need import-map support, resolves to a path
+  `server.js` actually serves, parses the inline
   module as real ESM (there is no bundler to catch a typo), cross-checks every
   DOM id the module looks up against the markup, validates the weapon table
   against `SLOT_ORDER`, proves every protocol verb the client sends is one the
@@ -316,7 +319,9 @@ npm run check
   collisions, walking up the stair onto the vantage deck, waist-high cover still
   blocking, hitscan ray casts against the real level, pitch-clamp camera-flip
   protection, yaw wrapping, run/stop/jump cycles, smoke growth and expiry, weapon
-  reload arithmetic, remote-player interpolation, and the objective: site hits
+  reload arithmetic, remote-player interpolation, the boot watchdog's diagnosis
+  (run under stubs: a 404 must be reported as a 404, and a booted engine must
+  produce no message at all), and the objective: site hits
   and misses, the round packet, the hold-to-plant / hold-to-defuse channels
   (including that releasing early or standing outside the zone sends nothing),
   and the armed bomb's blink. Nothing is reimplemented, so a regression in

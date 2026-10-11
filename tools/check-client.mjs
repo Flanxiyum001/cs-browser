@@ -5,7 +5,8 @@
  *  index.html has no build step, so nothing else would catch a typo in the
  *  inline module. This does three cheap, high-value checks:
  *
- *    1. the document starts with a doctype and declares a `three` import map
+ *    1. the document starts with a doctype and imports three.js from a literal
+ *       URL that server.js really serves (no import map to depend on)
  *    2. the inline module parses as real ES module syntax (`node --check`)
  *    3. every element id the module looks up actually exists in the markup
  *
@@ -38,26 +39,40 @@ console.log('document');
 if (html.startsWith('<!DOCTYPE html>')) pass('starts with a doctype');
 else fail('does not start with <!DOCTYPE html>');
 
-if (/<script\s+type="importmap">/.test(html)) pass('declares an import map');
-else fail('missing <script type="importmap">');
-
-const importMap = html.match(/<script\s+type="importmap">([\s\S]*?)<\/script>/);
-let threePath = null;
-if (importMap) {
-  try {
-    threePath = JSON.parse(importMap[1]).imports?.three ?? null;
-  } catch {
-    fail('import map is not valid JSON');
-  }
+/*
+ * How the client resolves three.js. A relative URL is deliberate: a bare
+ * specifier ('three') resolved through an import map makes boot depend on the
+ * browser supporting import maps, on the map surviving whatever proxy touches
+ * the HTML, and on the mapped absolute path being exactly right -- and every
+ * one of those failures looks the same from outside, namely "the module never
+ * ran". So assert the specifier is a literal URL, and that the relay serves it.
+ */
+const importLine = html.match(/import\s+\*\s+as\s+THREE\s+from\s+'([^']+)'/);
+const threePath = importLine ? importLine[1] : null;
+if (!threePath) {
+  fail('the client does not import THREE from a literal URL');
+} else if (threePath.startsWith('./') || threePath.startsWith('../')) {
+  pass(`the client imports three.js by relative URL (${threePath})`);
+} else if (threePath.startsWith('https://')) {
+  pass(`the client imports three.js from a CDN (${threePath})`);
+} else {
+  fail(`the THREE specifier is neither a relative path nor an https URL: ${threePath}`);
 }
-if (threePath) pass(`import map resolves "three" -> ${threePath}`);
-else fail('import map has no "three" entry');
 
-/* the vendored path must be the one server.js actually serves */
-if (threePath && threePath.startsWith('/')) {
-  const server = await readFile(path.join(ROOT, 'server.js'), 'utf8');
-  if (server.includes(`'${threePath}'`)) pass('server.js serves that exact vendor path');
-  else fail(`server.js does not serve ${threePath}`);
+/* A real import map is a tag followed by its JSON body. Match that, not the
+   words "import map" inside a comment explaining why there isn't one. */
+if (/<script\s+type="importmap">\s*\{/.test(html)) {
+  console.log('  ! the page still declares an import map; nothing imports a bare specifier any more');
+} else {
+  pass('the page no longer depends on an import map to resolve three.js');
+}
+
+/* a relative specifier must resolve to a route server.js really serves */
+if (threePath && threePath.startsWith('./')) {
+  const serverSrc = await readFile(path.join(ROOT, 'server.js'), 'utf8');
+  const route = threePath.slice(1);            // './vendor/x.js' -> '/vendor/x.js'
+  if (serverSrc.includes(`'${route}'`)) pass(`server.js serves that exact path (${route})`);
+  else fail(`server.js does not serve ${route}`);
 }
 
 /* --------------------------------------------------------------- 2. syntax */
@@ -199,8 +214,8 @@ if (!moduleMatch) {
   /* --------------------------------------------------- 6. static assets --
      server.js preloads a fixed route table at boot and DROPS any entry it
      cannot read. A dropped route is a 404 at request time, and because the
-     client's import map points straight at /vendor/three.module.js, that 404
-     is a black page with nothing on it but the boot overlay. So assert the
+     client imports /vendor/three.module.js directly, that 404 is a black page
+     with nothing on it but the boot overlay. So assert the
      files the table names are genuinely in the repository -- naming a path in
      server.js is not the same as shipping the file. */
   console.log('\nstatic asset routes');
