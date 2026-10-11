@@ -79,6 +79,13 @@ jobs:
       - name: Install the Railway CLI
         run: npm install --global @railway/cli
 
+      # `npm test`-style scripts run from this package's own package.json:
+      #   - install    -> `bun install --frozen-lockfile`
+      #   - build      -> `bun run build` (static output in dist/, no server)
+      # The Railway CLI is a *global* npm package, so it belongs in the
+      # workflow itself and not in the project install phase. CI installs it
+      # with `npm install --global @railway/cli` (your run printed exactly
+      # that, with only the expected deprecation warnings).
       # Name what is missing instead of letting the CLI fail on an empty flag.
       - name: Check the deploy configuration
         run: |
