@@ -17,7 +17,7 @@ third-party network calls at runtime.
 
 ---
 
-## The network model, and why it is cheap
+## The network model
 
 This is a **strict client-authoritative** design, and that is the single decision
 that keeps hosting cost near zero.
