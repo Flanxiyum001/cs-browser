@@ -221,32 +221,93 @@ const STATIC_ROUTES = new Map([
    * the one thing worth holding in RAM: no disk I/O on the request path, and
    * it still serves on a read-only container filesystem.
    */
+  /*
+   * The client's inline module does `import * as THREE from 'three'`, and the
+   * import map resolves that to this path. So this route is NOT optional: if it
+   * 404s, the browser refuses to run the page's module and the game sits on its
+   * boot screen forever with nothing in the console but a failed request.
+   *
+   * It is served from the copy committed in vendor/ first, which makes the
+   * deploy independent of node_modules being installed at runtime, and only
+   * falls back to the installed package. `required: true` makes a missing copy
+   * a loud boot failure instead of a silent 404 at request time.
+   */
   [
     '/vendor/three.module.js',
-    { file: 'node_modules/three/build/three.module.js', type: 'text/javascript; charset=utf-8' },
+    {
+      file: 'vendor/three.module.js',
+      fallback: 'node_modules/three/build/three.module.js',
+      type: 'text/javascript; charset=utf-8',
+      required: true,
+    },
   ],
+  /*
+   * The minified variant is a genuine optional build: the client imports the
+   * readable one, and this exists only as a lighter alternative. It is served
+   * from the installed package and simply does not exist on a host without
+   * node_modules, which is why it is not `required` and why there is no
+   * committed copy to name here.
+   */
   [
     '/vendor/three.module.min.js',
-    { file: 'node_modules/three/build/three.module.min.js', type: 'text/javascript; charset=utf-8' },
+    {
+      file: 'node_modules/three/build/three.module.min.js',
+      type: 'text/javascript; charset=utf-8',
+    },
   ],
 ]);
 
 /** @type {Map<string, {file: string, type: string, live?: boolean, body?: Buffer, etag?: string}>} */
 const routes = new Map();
 
+/**
+ * First path in the list that exists, or null. The vendored copy is committed
+ * to the repository so it wins on any host, and node_modules is only the
+ * fallback for a checkout that has not committed it yet.
+ */
+async function loadFirst(candidates) {
+  for (const rel of candidates) {
+    if (!rel) continue;
+    try {
+      return { file: rel, body: await readFile(path.join(ROOT, rel)) };
+    } catch {
+      // try the next location
+    }
+  }
+  return null;
+}
+
 async function preloadAssets() {
+  const missingRequired = [];
+
   for (const [route, spec] of STATIC_ROUTES) {
     const entry = { ...spec };
     routes.set(route, entry);
     if (spec.live) continue;
-    try {
-      const body = await readFile(path.join(ROOT, spec.file));
-      entry.body = body;
-      // Weak content fingerprint: good enough for a file we already pin forever.
-      entry.etag = `"${body.length.toString(36)}-${spec.file.length.toString(36)}"`;
-    } catch {
-      routes.delete(route); // optional build (e.g. the minified variant)
+
+    const loaded = await loadFirst([spec.file, spec.fallback]);
+    if (!loaded) {
+      routes.delete(route);
+      if (spec.required) missingRequired.push(`${route} (looked for ${spec.file})`);
+      continue;
     }
+    entry.body = loaded.body;
+    entry.servedFrom = loaded.file;
+    // Weak content fingerprint: good enough for a file we already pin forever.
+    entry.etag = `"${loaded.body.length.toString(36)}-${loaded.file.length.toString(36)}"`;
+  }
+
+  /*
+   * A relay that cannot serve the client's own module is not partially broken,
+   * it is broken: the page will sit on its boot screen with a 404 in the
+   * network tab. Crash at boot with the cause instead, because that is visible
+   * in a deploy log where a lazy 404 never is.
+   */
+  if (missingRequired.length) {
+    throw new Error(
+      `required static asset missing: ${missingRequired.join(', ')} - ` +
+      'commit the vendored build in vendor/ or install dependencies (bun install)'
+    );
   }
 
   // Fail fast and loudly if the client itself is missing.
@@ -254,6 +315,13 @@ async function preloadAssets() {
     await readFile(path.join(ROOT, 'index.html'));
   } catch (err) {
     throw new Error(`client missing: index.html (${err.message})`);
+  }
+
+  // One line per pinned route, so a deploy log proves what is being served and
+  // from where -- this is the evidence a 404 here can never fake.
+  for (const [route, entry] of routes) {
+    if (entry.live) continue;
+    console.log(`  asset  : ${route} <- ${entry.servedFrom} (${entry.body.length} bytes)`);
   }
 }
 
@@ -309,6 +377,9 @@ const server = createServer(async (req, res) => {
         // Always fresh: a deploy or a local edit must never be masked by a
         // cached copy of the client.
         'cache-control': 'no-store',
+        // Do not let a browser guess a type: an ES module served as anything
+        // else is refused outright, which is the black-screen failure mode.
+        'x-content-type-options': 'nosniff',
       });
       res.end(isHead ? undefined : body);
       return;
@@ -326,6 +397,7 @@ const server = createServer(async (req, res) => {
       'content-length': entry.body.length,
       'cache-control': 'public, max-age=31536000, immutable',
       etag: entry.etag,
+      'x-content-type-options': 'nosniff',
     });
     res.end(isHead ? undefined : entry.body);
   } catch (err) {

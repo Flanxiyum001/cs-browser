@@ -14,6 +14,7 @@
  */
 
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -194,6 +195,42 @@ if (!moduleMatch) {
     if (badFloor.length) fail(`degenerate site rectangle(s): ${badFloor.map(key).join(', ')}`);
     else pass('every site rectangle has a positive area');
   }
+
+  /* --------------------------------------------------- 6. static assets --
+     server.js preloads a fixed route table at boot and DROPS any entry it
+     cannot read. A dropped route is a 404 at request time, and because the
+     client's import map points straight at /vendor/three.module.js, that 404
+     is a black page with nothing on it but the boot overlay. So assert the
+     files the table names are genuinely in the repository -- naming a path in
+     server.js is not the same as shipping the file. */
+  console.log('\nstatic asset routes');
+  const routeFiles = [...server.matchAll(/\bfile:\s*'([^']+)'/g)].map((m) => m[1]);
+  const repoRouteFiles = routeFiles.filter((f) => !f.startsWith('node_modules/'));
+  const missingRouteFiles = repoRouteFiles.filter((f) => !existsSync(path.join(ROOT, f)));
+  if (!repoRouteFiles.length) {
+    fail('could not read the static route table out of server.js');
+  } else if (missingRouteFiles.length) {
+    fail(`static routes point at files that are not in the repository: ${missingRouteFiles.join(', ')}`);
+  } else {
+    pass(`all ${repoRouteFiles.length} committed static route file(s) exist on disk`);
+  }
+
+  const vendoredThree = repoRouteFiles.find((f) => f.endsWith('three.module.js'));
+  if (!vendoredThree) {
+    fail('server.js does not serve a committed three.module.js');
+  } else {
+    const head = readFileSync(path.join(ROOT, vendoredThree), 'utf8').slice(0, 400);
+    if (!/<html/i.test(head) && /REVISION/.test(head)) {
+      pass('the vendored three.js is the real module, not an HTML error page');
+    } else {
+      fail(`the vendored three.js does not look like the real module: ${JSON.stringify(head.slice(0, 60))}`);
+    }
+  }
+
+  // The one route that may never be dropped: the client dies without it.
+  const requiredVendor = /\/vendor\/three\.module\.js'[\s\S]{0,220}?required:\s*true/.test(server);
+  if (requiredVendor) pass('the vendored three.js route is marked required, so it fails loudly instead of 404ing');
+  else fail('the /vendor/three.module.js route is not marked required -- a missing copy would 404 silently');
 }
 
 console.log(failed === 0 ? '\nclient checks passed' : `\n${failed} client check(s) failed`);

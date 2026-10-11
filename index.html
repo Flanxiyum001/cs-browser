@@ -445,6 +445,43 @@
   <div id="boot"><div class="txt">booting <b>engine</b></div></div>
 
 <!-- =========================================================================
+     BOOT WATCHDOG
+     The engine below is an ES module. If the browser cannot fetch or parse it
+     -- a 404 or a wrong content-type on /vendor/three.module.js, which is where
+     the import map sends the bare 'three' specifier -- then the module never
+     executes and nothing inside it can report why. This classic script stays
+     alive in exactly that case, so a silent black boot screen becomes the real
+     reason instead of a mystery.
+     ========================================================================= -->
+<script>
+(function () {
+  var boot = document.getElementById('boot');
+  function fail(msg) {
+    if (!boot) return;
+    boot.hidden = false;
+    boot.innerHTML = '<div class="txt" style="max-width:64ch;text-align:center;line-height:1.9">' +
+      'engine failed to load &mdash; <b>' + msg + '</b></div>';
+  }
+  // Resource-level failures do not reach the module's own try/catch.
+  window.addEventListener('error', function (e) {
+    var t = e && e.target;
+    if (t && t !== window && (t.tagName === 'SCRIPT' || t.tagName === 'LINK')) {
+      fail('could not load ' + (t.src || t.href));
+    }
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    fail(String((r && (r.message || r)) || 'module rejected'));
+  });
+  // If the module has not booted the engine by now, say so rather than sitting
+  // on the boot screen forever.
+  setTimeout(function () {
+    if (!window.__game) fail('the client module never ran &mdash; check the network tab for /vendor/three.module.js');
+  }, 8000);
+})();
+</script>
+
+<!-- =========================================================================
      CLIENT ENGINE
      Everything below is one self-contained module: no bundler, no framework,
      no build step, no third-party script tags.

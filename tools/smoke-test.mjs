@@ -136,12 +136,24 @@ async function main() {
     );
     const health = await fetch(`${BASE}/health`);
     check('GET /health -> ok', health.status === 200 && (await health.json()).ok === true);
+    /*
+     * The client's import map sends `three` here, so this one asset is the
+     * difference between a playable page and a black screen with a failed
+     * request in it. Check the three things a browser actually cares about:
+     * the status, the content-type (a module served as text/html is refused),
+     * and that the bytes are the real library rather than a 404 page.
+     */
     const vendor = await fetch(`${BASE}/vendor/three.module.js`);
-    check('GET /vendor/three.module.js -> 200', vendor.status === 200);
-    check(
-      'vendored three.js is the real build',
-      (await vendor.text()).includes('REVISION')
-    );
+    const vendorType = vendor.headers.get('content-type') || '';
+    const vendorBody = await vendor.text();
+    check('GET /vendor/three.module.js -> 200', vendor.status === 200, `status=${vendor.status}`);
+    check('the vendored module is served as JavaScript',
+      vendorType.includes('text/javascript'), `content-type=${vendorType}`);
+    check('the vendored module carries x-content-type-options: nosniff',
+      vendor.headers.get('x-content-type-options') === 'nosniff');
+    check('the vendored module is the real build, not an HTML 404 page',
+      !vendorBody.trimStart().startsWith('<') && vendorBody.includes('REVISION'),
+      `starts with ${JSON.stringify(vendorBody.slice(0, 24))}`);
     const missing = await fetch(`${BASE}/nope`);
     check('unknown route -> 404', missing.status === 404);
 

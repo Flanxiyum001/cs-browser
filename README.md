@@ -10,6 +10,7 @@ Three files matter:
 | --- | --- |
 | `server.js` | the whole backend: short-id session bookkeeping + blind packet fan-out + static hosting |
 | `index.html` | the whole client: engine, level, weapons, utilities, HUD — one self-contained page |
+| `vendor/three.module.js` | the pinned three.js build, committed so the page works without an install step |
 | `tools/` | verification harnesses (see [Verifying](#verifying)) |
 
 There is no bundler, no build step, no framework, no asset files and no
@@ -302,7 +303,11 @@ npm run check
   DOM id the module looks up against the markup, validates the weapon table
   against `SLOT_ORDER`, proves every protocol verb the client sends is one the
   relay handles, and compares the client's bomb-site rectangles against the
-  relay's copy of them.
+  relay's copy of them. It also verifies that every file named in `server.js`'s
+  static route table really exists in the repository: naming a path there is not
+  the same as shipping the file, and a route that cannot be read is dropped at
+  boot and 404s at request time — which is a black page with nothing on it but
+  the boot overlay.
 
 * **`tools/headless-logic-test.mjs`** — **runs the real client module.** It
   extracts the live `<script>` out of `index.html`, rewrites the bare `three`
@@ -328,8 +333,9 @@ npm run check
   across the room is refused while one standing on the bomb is accepted, the
   round snapshot flips phase and drops the bomb position when the round ends,
   and a late joiner is handed the live round state on arrival. It also checks
-  the static host serves the game shell and the vendored three.js build, then
-  tears the child down.
+  the static host serves the game shell and the vendored three.js build — status,
+  `text/javascript` content-type, `nosniff`, and that the bytes are the real
+  library rather than an HTML error page — then tears the child down.
 
 ---
 
@@ -338,6 +344,8 @@ npm run check
 ```
 server.js                 relay + static host (the entire backend)
 index.html                client (the entire frontend)
+vendor/
+  three.module.js         the pinned three.js build, served at /vendor/three.module.js
 Procfile                  Railway/Nixpacks process declaration
 package.json              ws + three, run and check scripts
 .github/workflows/
