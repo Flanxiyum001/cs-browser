@@ -1,0 +1,26 @@
+{
+  "name": "cs-browser",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Lightweight browser-based tactical FPS with a client-authoritative WebSocket relay backend.",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "smoke": "node tools/smoke-test.mjs",
+    "check:client": "node tools/check-client.mjs",
+    "check:logic": "node tools/headless-logic-test.mjs",
+    "check": "node tools/check-client.mjs && node tools/headless-logic-test.mjs && node tools/smoke-test.mjs"
+  },
+  "dependencies": {
+    "three": "^0.169",
+    "ws": "^8"
+  },
+  "devDependencies": {
+    "typescript": "^5.6"
+  }
+}

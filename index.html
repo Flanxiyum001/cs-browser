@@ -1,0 +1,3631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta name="color-scheme" content="dark" />
+<meta name="description" content="cs-browser - a lightweight browser tactical FPS with a client-authoritative WebSocket relay." />
+<title>cs-browser // tactical</title>
+
+<!--
+  ===========================================================================
+   THREE.JS MODULE RESOLUTION
+  ---------------------------------------------------------------------------
+   The relay in server.js serves the pinned three.js build out of node_modules
+   at /vendor/three.module.js, so this page has zero third-party network calls
+   and works offline.
+
+   If you host THIS FILE somewhere else (GitHub Pages, Netlify, a CDN) and only
+   run server.js as the socket relay, point the import map at a CDN instead:
+
+     "three": "https://unpkg.com/three@0.169.0/build/three.module.js"
+
+   Nothing else in this file has to change.
+  ===========================================================================
+-->
+<script type="importmap">
+{
+  "imports": {
+    "three": "/vendor/three.module.js"
+  }
+}
+</script>
+
+<style>
+  /* =========================================================================
+     DESIGN TOKENS - de_dust style tactical palette
+     ========================================================================= */
+  :root {
+    --ink:        #070908;
+    --panel:      rgba(9, 12, 10, 0.74);
+    --panel-edge: rgba(158, 178, 150, 0.16);
+    --amber:      #f0b432;
+    --amber-dim:  #8a6a22;
+    --steel:      #93a6a3;
+    --steel-dim:  #5c6b69;
+    --danger:     #d8433a;
+    --friendly:   #6ea8d8;
+    --ok:         #8fce4e;
+    --ch:         #46ff8a;
+    --mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: var(--ink);
+    color: #e7efe6;
+    font-family: var(--mono);
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    cursor: default;
+  }
+
+  canvas { display: block; }
+
+  /* Cheap film grain + vignette baked into one fixed layer. */
+  #grain {
+    position: fixed; inset: 0; z-index: 4; pointer-events: none;
+    background:
+      radial-gradient(ellipse at center, rgba(0,0,0,0) 42%, rgba(0,0,0,0.55) 100%),
+      repeating-linear-gradient(0deg, rgba(255,255,255,0.018) 0 1px, rgba(0,0,0,0) 1px 3px);
+    mix-blend-mode: multiply;
+  }
+
+  /* =========================================================================
+     HUD SHELL
+     ========================================================================= */
+  #hud { position: fixed; inset: 0; z-index: 6; pointer-events: none; }
+
+  .tape {
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    backdrop-filter: blur(3px);
+    padding: 8px 12px;
+  }
+
+  .k { color: var(--steel-dim); font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; }
+  .v { color: #eef4ec; font-size: 15px; font-weight: 600; letter-spacing: 0.04em; }
+
+  /* --- crosshair --------------------------------------------------------- */
+  #ch {
+    position: absolute; left: 50%; top: 50%; width: 0; height: 0;
+    --gap: 5px;
+  }
+  #ch i, #ch b {
+    position: absolute; display: block; background: var(--ch);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.85);
+    transition: none;
+  }
+  #ch .t, #ch .b { width: 2px; height: 8px; left: -1px; }
+  #ch .l, #ch .r { width: 8px; height: 2px; top: -1px; }
+  #ch .t { top: calc(-1px - 8px - var(--gap)); }
+  #ch .b { top: calc(1px + var(--gap)); }
+  #ch .l { left: calc(-1px - 8px - var(--gap)); }
+  #ch .r { left: calc(1px + var(--gap)); }
+  #ch .dot {
+    position: absolute; width: 2px; height: 2px; left: -1px; top: -1px;
+    background: var(--ch); opacity: 0.85;
+  }
+  #ch.hidden { display: none; }
+
+  /* --- hit marker -------------------------------------------------------- */
+  #hitmarker {
+    position: absolute; left: 50%; top: 50%; width: 0; height: 0; opacity: 0;
+  }
+  #hitmarker i {
+    position: absolute; width: 11px; height: 2px; background: #fff;
+    box-shadow: 0 0 3px rgba(0,0,0,0.9);
+  }
+  #hitmarker .a { transform: rotate(45deg)  translate(8px, 0); }
+  #hitmarker .b { transform: rotate(-45deg) translate(8px, 0); }
+  #hitmarker .c { transform: rotate(135deg) translate(8px, 0); }
+  #hitmarker .d { transform: rotate(-135deg) translate(8px, 0); }
+  #hitmarker.kill i { background: var(--danger); width: 14px; }
+
+  /* --- corners ----------------------------------------------------------- */
+  #netpanel { position: absolute; right: 16px; top: 16px; min-width: 168px; }
+  #netpanel .row { display: flex; justify-content: space-between; gap: 14px; align-items: baseline; }
+  #netpanel .row + .row { margin-top: 3px; }
+  #conn.online  { color: var(--ok); }
+  #conn.offline { color: var(--amber); }
+  #conn.dead    { color: var(--danger); }
+
+  #slotbar { position: absolute; left: 16px; top: 16px; display: flex; gap: 6px; }
+  #slotbar .slot {
+    min-width: 62px; padding: 6px 8px;
+    background: var(--panel); border: 1px solid var(--panel-edge);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  #slotbar .slot .n { font-size: 9px; letter-spacing: 0.2em; color: var(--steel-dim); }
+  #slotbar .slot .l { font-size: 11px; color: var(--steel); letter-spacing: 0.06em; }
+  #slotbar .slot.active { border-color: var(--amber); background: rgba(46, 36, 10, 0.82); }
+  #slotbar .slot.active .l { color: var(--amber); }
+  #slotbar .slot.empty .l { color: #4a5450; text-decoration: line-through; }
+
+  #vitals { position: absolute; left: 16px; bottom: 16px; display: flex; align-items: flex-end; gap: 14px; }
+  #hpwrap { min-width: 168px; }
+  #hpline { display: flex; align-items: baseline; gap: 8px; }
+  #hp { font-size: 40px; line-height: 0.9; font-weight: 700; color: var(--ok); letter-spacing: -0.02em; }
+  #hp.hurt { color: var(--amber); }
+  #hp.crit { color: var(--danger); }
+  #hpbar { margin-top: 6px; height: 4px; background: rgba(255,255,255,0.10); overflow: hidden; }
+  #hpbar i { display: block; height: 100%; width: 100%; background: var(--ok); transition: width 90ms linear; }
+  #hp.hurt ~ #hpbar i { background: var(--amber); }
+
+  #ammowrap { text-align: right; min-width: 168px; }
+  #ammo { font-size: 40px; line-height: 0.9; font-weight: 700; letter-spacing: -0.02em; }
+  #ammo .res { font-size: 17px; color: var(--steel-dim); font-weight: 500; }
+  #ammo.low { color: var(--danger); }
+  #wname { color: var(--amber); font-size: 12px; letter-spacing: 0.24em; text-transform: uppercase; margin-top: 4px; }
+  #reload { color: var(--danger); font-size: 11px; letter-spacing: 0.2em; height: 14px; margin-top: 2px; }
+
+  /* --- kill feed --------------------------------------------------------- */
+  #killfeed { position: absolute; right: 16px; top: 108px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+  #killfeed .kf {
+    background: var(--panel); border: 1px solid var(--panel-edge);
+    padding: 4px 9px; font-size: 11px; letter-spacing: 0.05em;
+    animation: kfIn 160ms ease-out;
+  }
+  #killfeed .kf .me { color: var(--amber); }
+  #killfeed .kf .vic { color: var(--steel); }
+  #killfeed .kf .w { color: var(--danger); padding: 0 6px; }
+  @keyframes kfIn { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; } }
+
+  /* --- full screen effect layers ----------------------------------------- */
+  #flash-overlay, #smoke-overlay, #damage-overlay {
+    position: fixed; inset: 0; z-index: 7; pointer-events: none; opacity: 0;
+  }
+  #flash-overlay { background: radial-gradient(circle at center, #ffffff 0%, #fffdf0 55%, #f6e9c4 100%); }
+  #smoke-overlay { background: radial-gradient(circle at center, rgba(196,200,196,0.92) 0%, rgba(150,155,150,0.75) 100%); }
+  #damage-overlay {
+    background: radial-gradient(ellipse at center, rgba(150,10,10,0) 34%, rgba(160,18,12,0.85) 100%);
+  }
+  #deadscreen {
+    position: fixed; inset: 0; z-index: 8; pointer-events: none;
+    background: rgba(24, 4, 4, 0.42); opacity: 0; transition: opacity 300ms ease;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  }
+  #deadscreen.on { opacity: 1; }
+  #deadscreen .t1 { font-size: 13px; letter-spacing: 0.4em; color: #d9b0a8; }
+  #deadscreen .t2 { font-size: 30px; font-weight: 700; letter-spacing: 0.06em; color: #fff; }
+  #deadscreen .t3 { font-size: 12px; letter-spacing: 0.22em; color: var(--steel); margin-top: 10px; }
+
+  /* --- scoreboard -------------------------------------------------------- */
+  #scoreboard {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    min-width: 520px; background: rgba(6, 9, 8, 0.9);
+    border: 1px solid var(--panel-edge); padding: 18px 20px; display: none;
+  }
+  #scoreboard.on { display: block; }
+  #scoreboard h2 {
+    font-size: 11px; letter-spacing: 0.34em; color: var(--amber);
+    font-weight: 600; margin-bottom: 12px; text-transform: uppercase;
+  }
+  #scoreboard table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #scoreboard th {
+    text-align: left; font-size: 9px; letter-spacing: 0.22em; color: var(--steel-dim);
+    font-weight: 500; padding-bottom: 6px; text-transform: uppercase;
+  }
+  #scoreboard th.num, #scoreboard td.num { text-align: right; }
+  #scoreboard td { padding: 5px 0; border-top: 1px solid rgba(255,255,255,0.05); }
+  #scoreboard tr.me td { color: var(--amber); }
+  #scoreboard .ct { color: var(--friendly); }
+  #scoreboard .t { color: #c8a86a; }
+  #sb-empty { color: var(--steel-dim); font-size: 12px; padding-top: 10px; }
+  #scoreboard .objective-line {
+    display: flex; justify-content: space-between; gap: 14px;
+    font-size: 11px; letter-spacing: 0.16em; color: var(--steel);
+    border-top: 1px solid rgba(255,255,255,0.06); margin-top: 12px; padding-top: 9px;
+    text-transform: uppercase;
+  }
+  #scoreboard .objective-line b { color: var(--amber); font-weight: 600; }
+
+  /* --- objective strip: round clock, phase, plant channel ---------------- */
+  #objective {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 7px;
+    pointer-events: none; text-align: center;
+  }
+  #obj-clock {
+    font-size: 32px; font-weight: 700; line-height: 1; color: #f2f7ee;
+    letter-spacing: 0.06em; font-variant-numeric: tabular-nums;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
+  }
+  #objective.armed #obj-clock { color: var(--danger); }
+  #objective.armed #obj-clock { animation: obj-blink 1s steps(2, end) infinite; }
+  @keyframes obj-blink { 50% { opacity: 0.4; } }
+  #obj-strip {
+    font-size: 10px; letter-spacing: 0.26em; text-transform: uppercase;
+    color: var(--amber); background: rgba(6, 9, 8, 0.72);
+    border: 1px solid var(--panel-edge); padding: 4px 12px;
+  }
+  #objective.armed #obj-strip { color: #ffb1a6; }
+  #obj-track { width: 168px; height: 3px; background: rgba(255,255,255,0.12); display: none; }
+  #obj-track.on { display: block; }
+  #obj-track i { display: block; height: 100%; width: 0%; background: var(--amber); }
+  #obj-track.defuse i { background: var(--friendly); }
+  #obj-prompt {
+    position: absolute; left: 50%; top: 58%; transform: translateX(-50%);
+    font-size: 11px; letter-spacing: 0.24em; text-transform: uppercase;
+    color: #e9f2e6; background: rgba(6, 9, 8, 0.66); border: 1px solid var(--panel-edge);
+    padding: 6px 12px; pointer-events: none; display: none; white-space: nowrap;
+  }
+  #obj-prompt.on { display: block; }
+
+  /* =========================================================================
+     SCREENS (start / paused)
+     ========================================================================= */
+  .screen {
+    position: fixed; inset: 0; z-index: 20;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background:
+      radial-gradient(ellipse at 50% 30%, rgba(38, 46, 38, 0.55) 0%, rgba(4, 6, 5, 0.97) 70%),
+      repeating-linear-gradient(90deg, rgba(255,255,255,0.014) 0 1px, rgba(0,0,0,0) 1px 4px);
+    text-align: center; padding: 28px;
+  }
+  .screen[hidden] { display: none; }
+
+  .brand { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .brand .mark {
+    font-size: 12px; letter-spacing: 0.6em; color: var(--amber); text-transform: uppercase;
+    padding-left: 0.6em;
+  }
+  .brand h1 {
+    font-size: clamp(38px, 8vw, 76px); line-height: 0.92; font-weight: 800;
+    letter-spacing: -0.03em; color: #f2f7ee;
+  }
+  .brand h1 em { font-style: normal; color: var(--amber); }
+  .brand .sub { font-size: 11px; letter-spacing: 0.3em; color: var(--steel-dim); text-transform: uppercase; }
+
+  .rule { width: min(760px, 88vw); height: 1px; background: var(--panel-edge); margin: 26px 0; }
+
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 26px; width: min(760px, 88vw); text-align: left; }
+  .cols .item { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; padding: 4px 0; border-bottom: 1px dashed rgba(255,255,255,0.06); }
+  .cols .item span:first-child { color: var(--steel-dim); letter-spacing: 0.14em; font-size: 10px; text-transform: uppercase; }
+  .cols .item span:last-child { color: #dfe8dc; }
+
+  .startrow { display: flex; gap: 10px; align-items: stretch; margin-top: 4px; }
+  #start-name {
+    background: rgba(255,255,255,0.04); border: 1px solid var(--panel-edge);
+    color: #fff; font-family: var(--mono); font-size: 13px; letter-spacing: 0.14em;
+    padding: 12px 14px; width: 200px; outline: none; text-transform: uppercase;
+  }
+  #start-name:focus { border-color: var(--amber-dim); }
+  button.act {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.28em; text-transform: uppercase;
+    background: var(--amber); color: #16120a; border: 0; padding: 12px 30px;
+    cursor: pointer; font-weight: 700; transition: filter 120ms ease, transform 120ms ease;
+  }
+  button.act:hover { filter: brightness(1.12); transform: translateY(-1px); }
+  button.act.ghost { background: transparent; color: var(--steel); border: 1px solid var(--panel-edge); }
+  button.act.ghost:hover { color: #fff; border-color: var(--steel-dim); }
+
+  #conn-note { margin-top: 16px; font-size: 11px; letter-spacing: 0.16em; color: var(--steel-dim); }
+  #conn-note.err { color: var(--amber); }
+  #conn-note code { color: var(--steel); }
+
+  .paused-title { font-size: 13px; letter-spacing: 0.5em; color: var(--amber); text-transform: uppercase; }
+  .paused-sub { font-size: 11px; letter-spacing: 0.2em; color: var(--steel-dim); margin-top: 10px; }
+  .paused-btns { display: flex; gap: 10px; margin-top: 24px; }
+
+  #boot { position: fixed; inset: 0; z-index: 40; background: var(--ink); display: flex; align-items: center; justify-content: center; }
+  #boot[hidden] { display: none; }
+  #boot .txt { font-size: 11px; letter-spacing: 0.4em; color: var(--steel-dim); text-transform: uppercase; }
+  #boot .txt b { color: var(--amber); }
+</style>
+</head>
+
+<body>
+  <div id="grain"></div>
+
+  <!-- =======================================================================
+       HUD
+       ======================================================================= -->
+  <div id="hud">
+    <div id="ch">
+      <i class="t"></i><i class="b"></i><i class="l"></i><i class="r"></i><span class="dot"></span>
+    </div>
+    <div id="hitmarker"><i class="a"></i><i class="b"></i><i class="c"></i><i class="d"></i></div>
+
+    <div id="slotbar"></div>
+
+    <div id="netpanel" class="tape">
+      <div class="row"><span class="k">link</span><span class="v" id="conn">init</span></div>
+      <div class="row"><span class="k">ping</span><span class="v" id="ping">--</span></div>
+      <div class="row"><span class="k">players</span><span class="v" id="pcount">1</span></div>
+      <div class="row"><span class="k">id</span><span class="v" id="pid">--</span></div>
+    </div>
+
+    <div id="killfeed"></div>
+
+    <div id="vitals">
+      <div id="hpwrap" class="tape">
+        <div id="hpline"><span class="k">health</span><span id="hp">100</span></div>
+        <div id="hpbar"><i></i></div>
+      </div>
+      <div id="ammowrap" class="tape">
+        <div id="ammo"><span class="mag">30</span><span class="res"> / 90</span></div>
+        <div id="wname">rifle</div>
+        <div id="reload"></div>
+      </div>
+    </div>
+
+    <div id="objective">
+      <div id="obj-clock">--:--</div>
+      <div id="obj-strip">objective: standby</div>
+      <div id="obj-track"><i></i></div>
+    </div>
+    <div id="obj-prompt">hold E to plant</div>
+
+    <div id="scoreboard">
+      <h2>Scoreboard &mdash; hold TAB</h2>
+      <table>
+        <thead>
+          <tr><th>player</th><th>side</th><th class="num">k</th><th class="num">d</th><th class="num">ping</th></tr>
+        </thead>
+        <tbody id="sb-rows"></tbody>
+      </table>
+      <div id="sb-empty">no other operatives connected</div>
+      <div class="objective-line">
+        <span>round <b id="sb-round">1</b></span>
+        <span id="sb-phase">live</span>
+        <span id="sb-clock">--:--</span>
+        <span>detonated <b id="sb-detonated">0</b> &middot; defused <b id="sb-defused">0</b></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="smoke-overlay"></div>
+  <div id="flash-overlay"></div>
+  <div id="damage-overlay"></div>
+
+  <div id="deadscreen">
+    <div class="t1">you were eliminated by</div>
+    <div class="t2" id="death-by">--</div>
+    <div class="t3">respawning in <span id="respawn-count">3</span></div>
+  </div>
+
+  <!-- =======================================================================
+       START SCREEN
+       ======================================================================= -->
+  <div id="overlay" class="screen">
+    <div class="brand">
+      <div class="mark">cs&middot;browser</div>
+      <h1>tactical <em>offensive</em></h1>
+      <div class="sub">client-authoritative &middot; websocket relay &middot; webgl&nbsp;2</div>
+    </div>
+
+    <div class="rule"></div>
+
+    <div class="cols">
+      <div class="item"><span>move</span><span>W A S D</span></div>
+      <div class="item"><span>jump</span><span>space</span></div>
+      <div class="item"><span>walk / crouch</span><span>shift / ctrl</span></div>
+      <div class="item"><span>look</span><span>mouse</span></div>
+      <div class="item"><span>fire</span><span>left click</span></div>
+      <div class="item"><span>reload</span><span>r</span></div>
+      <div class="item"><span>rifle / pistol</span><span>1 / 2</span></div>
+      <div class="item"><span>knife / smoke</span><span>3 / 4</span></div>
+      <div class="item"><span>flashbang</span><span>5</span></div>
+      <div class="item"><span>scoreboard</span><span>hold tab</span></div>
+    </div>
+
+    <div class="rule"></div>
+
+    <div class="startrow">
+      <input id="start-name" maxlength="16" placeholder="callsign" autocomplete="off" spellcheck="false" />
+      <button id="start-btn" class="act">click to deploy</button>
+    </div>
+
+    <div id="conn-note">linking to relay&hellip;</div>
+  </div>
+
+  <!-- =======================================================================
+       PAUSE SCREEN
+       ======================================================================= -->
+  <div id="paused" class="screen" hidden>
+    <div class="paused-title">paused</div>
+    <div class="paused-sub">pointer released &mdash; the match keeps running</div>
+    <div class="paused-btns">
+      <button id="resume-btn" class="act">resume</button>
+      <button id="sens-btn" class="act ghost">sensitivity <span id="sens-val">1.0</span></button>
+    </div>
+    <div id="conn-note-2" class="paused-sub"></div>
+  </div>
+
+  <div id="boot"><div class="txt">booting <b>engine</b></div></div>
+
+<!-- =========================================================================
+     CLIENT ENGINE
+     Everything below is one self-contained module: no bundler, no framework,
+     no build step, no third-party script tags.
+     ========================================================================= -->
+<script type="module">
+import * as THREE from 'three';
+
+/* ===========================================================================
+   [ 1 ]  NETWORK CONFIG   <- THE ONLY THING YOU EDIT AFTER DEPLOYING
+   ---------------------------------------------------------------------------
+   The client works out its socket endpoint in this exact order:
+
+     1. WS_ENDPOINT below, if you set it.
+     2. ?server=wss://your-relay.example.com  in the page URL (handy for
+        pointing a locally-served client at a deployed relay).
+     3. Otherwise: the origin the page was served from, upgraded to ws:// or
+        wss://. This is correct whenever server.js is serving this very file,
+        which is the single-service deployment described in README.md.
+
+   WHEN YOU SPLIT THE TWO HALVES (static client + Railway relay) you MUST
+   set #1. For example, after `railway up` reports a domain:
+
+       const WS_ENDPOINT = 'wss://cs-browser-production.up.railway.app/';
+                                                          ^ trailing slash is fine
+
+   Use wss:// (TLS) for anything reachable over the public internet: browsers
+   block ws:// from an https:// page as mixed content.
+   =========================================================================== */
+const WS_ENDPOINT = null;
+
+/* Everything else worth tuning lives here. */
+const CFG = {
+  /* --- networking --------------------------------------------------------- */
+  sendRate: 20,              // movement packets per second
+  positionEpsilon: 0.012,    // only transmit when the pose actually moved
+  angleEpsilon: 0.006,
+  pingIntervalMs: 2000,
+  reconnectMinMs: 800,
+  reconnectMaxMs: 8000,
+
+  /* --- camera ------------------------------------------------------------- */
+  fov: 78,
+  near: 0.045,
+  far: 260,
+  sensitivity: 0.0021,       // radians per pixel of mouse travel
+  invertY: false,
+  pitchLimit: Math.PI / 2 - 0.015,   // hard stop so the camera can never flip
+
+  /* --- player body -------------------------------------------------------- */
+  radius: 0.4,
+  height: 1.78,
+  eyeHeight: 1.66,
+  stepHeight: 0.36,          // auto-step height for kerbs and crates
+  gravity: 20.5,
+  jumpSpeed: 6.6,
+  runSpeed: 6.1,
+  walkSpeed: 3.1,
+  crouchSpeed: 2.05,
+  groundAccel: 62,
+  airAccel: 14,
+  friction: 11,
+  standHeight: 1.78,
+  crouchHeight: 1.2,
+
+  /* --- world -------------------------------------------------------------- */
+  arena: 32,                 // the floor plate is 2*arena across: 64 m
+  wallHeight: 4.4,           // top of the perimeter walls == the slab
+  ceilingHeight: 4.4,        // underside of the suspended ceiling
+  maxDecals: 140,
+  smokeLife: 15,
+
+  /* --- match objective ----------------------------------------------------
+     The relay owns the round clock and decides the outcome; these are the
+     client's copy of the same tuning table, used for the local hold-to-plant
+     channel and the HUD. Keep them in step with ROUND in server.js. */
+  roundSeconds: 95,          // length of a live round
+  fuseSeconds: 40,           // armed bomb countdown
+  intermissionSeconds: 9,    // pause between rounds
+  plantSeconds: 3.0,         // hold E inside a site to arm the bomb
+  defuseSeconds: 5.5,        // hold E on the armed bomb to disarm it
+  defuseRadius: 1.9,         // how close you must stand to reach the bomb
+};
+
+/* ===========================================================================
+   [ 2 ]  SMALL MATH HELPERS
+   =========================================================================== */
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const damp = (a, b, rate, dt) => lerp(a, b, 1 - Math.exp(-rate * dt));
+/** Deterministic 32-bit hash - used to derive per-player identity colours. */
+function hashInt(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+const SIDES = [
+  { tag: 'CT', color: 0x6ea8d8, accent: 0xa9d2f2 },
+  { tag: 'T',  color: 0xc8a86a, accent: 0xf0d7a4 },
+];
+/** Scratch vector reused by ray/box tests so the hot path allocates nothing. */
+const _scratchVec = new THREE.Vector3();
+
+/* ===========================================================================
+   [ 3 ]  PROCEDURAL AUDIO
+   ---------------------------------------------------------------------------
+   No sound files ship with this project, so every sound is synthesised with
+   a couple of oscillators / one shared noise buffer. That keeps the whole
+   client a single file with zero asset requests.
+   =========================================================================== */
+class Audio {
+  constructor() {
+    this.ctx = null;
+    this.master = null;
+    this.noise = null;
+    this.enabled = true;
+  }
+
+  /* Browsers require a user gesture before audio may start. */
+  unlock() {
+    if (this.ctx) return;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) { this.enabled = false; return; }
+    this.ctx = new Ctx();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.5;
+    this.master.connect(this.ctx.destination);
+
+    // One second of white noise, reused by every percussive sound.
+    const len = this.ctx.sampleRate;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    this.noise = buf;
+  }
+
+  get t() { return this.ctx ? this.ctx.currentTime : 0; }
+
+  noiseBurst({ dur, gain, type, freq, q, start = 0 }) {
+    if (!this.enabled || !this.ctx) return;
+    const t0 = this.t + start;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noise;
+    src.playbackRate.value = 1;
+    const flt = this.ctx.createBiquadFilter();
+    flt.type = type; flt.frequency.value = freq; flt.Q.value = q || 1;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(gain, t0 + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+    src.connect(flt); flt.connect(g); g.connect(this.master);
+    src.start(t0); src.stop(t0 + dur + 0.02);
+  }
+
+  tone({ f0, f1, dur, gain, type = 'sine', start = 0 }) {
+    if (!this.enabled || !this.ctx) return;
+    const t0 = this.t + start;
+    const o = this.ctx.createOscillator();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t0);
+    if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t0 + dur);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(gain, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t0); o.stop(t0 + dur + 0.02);
+  }
+
+  rifle()  { this.noiseBurst({ dur: 0.16, gain: 0.5,  type: 'lowpass',  freq: 1850, q: 0.7 });
+             this.tone({ f0: 180, f1: 60, dur: 0.1, gain: 0.28, type: 'square' }); }
+  pistol() { this.noiseBurst({ dur: 0.13, gain: 0.42, type: 'lowpass',  freq: 2300, q: 0.8 });
+             this.tone({ f0: 240, f1: 80, dur: 0.08, gain: 0.2, type: 'square' }); }
+  knife()  { this.noiseBurst({ dur: 0.1,  gain: 0.24, type: 'highpass', freq: 2600, q: 1.2 }); }
+  impact() { this.noiseBurst({ dur: 0.07, gain: 0.2,  type: 'bandpass', freq: 1400, q: 1.4 }); }
+  hit()    { this.tone({ f0: 1500, f1: 1200, dur: 0.05, gain: 0.16, type: 'square' }); }
+  kill()   { this.tone({ f0: 900,  f1: 1500, dur: 0.09, gain: 0.2,  type: 'square' }); }
+  reload() { this.tone({ f0: 300, f1: 180, dur: 0.07, gain: 0.16, type: 'square' }); }
+  deploy() { this.noiseBurst({ dur: 0.45, gain: 0.3, type: 'lowpass', freq: 900, q: 0.6 }); }
+  /* Ringing after a flashbang: a pair of detuned high sines that fade out. */
+  ring(seconds) {
+    if (!this.enabled || !this.ctx) return;
+    const d = clamp(seconds, 0.4, 7);
+    this.tone({ f0: 4200, f1: 4200, dur: d, gain: 0.05, type: 'sine' });
+    this.tone({ f0: 6100, f1: 6100, dur: d * 0.8, gain: 0.03, type: 'sine' });
+  }
+}
+const sfx = new Audio();
+
+/* ===========================================================================
+   [ 4 ]  NETWORK CLIENT
+   ---------------------------------------------------------------------------
+   A deliberately thin WebSocket wrapper. It owns *no* game state: it exposes
+   `send()` and an `on()` event table, and hands raw packets to the game. The
+   relay never simulates anything, so this class never has to reconcile.
+   =========================================================================== */
+class NetClient {
+  constructor(url) {
+    this.url = url;
+    this.ws = null;
+    this.connected = false;
+    this.id = null;
+    this.ping = 0;
+    this.listeners = new Map();
+    this.backoff = CFG.reconnectMinMs;
+    this.closedByUser = false;
+    this.pingTimer = null;
+    this.pingSeq = 0;
+    this.pingSentAt = 0;
+  }
+
+  on(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(fn);
+    return this;
+  }
+
+  emit(type, payload) {
+    const list = this.listeners.get(type);
+    if (list) for (const fn of list) fn(payload);
+  }
+
+  connect() {
+    this.closedByUser = false;
+    this._open();
+  }
+
+  _open() {
+    let ws;
+    try {
+      ws = new WebSocket(this.url);
+    } catch (err) {
+      this.emit('status', { state: 'dead', detail: String(err && err.message) });
+      this._retry();
+      return;
+    }
+    this.ws = ws;
+    this.emit('status', { state: 'connecting' });
+
+    ws.onopen = () => {
+      this.connected = true;
+      this.backoff = CFG.reconnectMinMs;
+      this.emit('status', { state: 'online' });
+      this.emit('open');
+      this.pingTimer = setInterval(() => this.probe(), CFG.pingIntervalMs);
+    };
+
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (!msg || typeof msg !== 'object') return;
+
+      if (msg.t === 'welcome') {
+        this.id = msg.id;
+        this.emit('welcome', msg);
+        return;
+      }
+      if (msg.t === 'pong') {
+        this.ping = Math.round(performance.now() - this.pingSentAt);
+        this.emit('pong', msg);
+        return;
+      }
+      this.emit(msg.t, msg);
+    };
+
+    ws.onclose = () => {
+      this.connected = false;
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+      if (this.closedByUser) return;
+      this.emit('status', { state: 'dead' });
+      this._retry();
+    };
+
+    ws.onerror = () => { /* the close handler owns recovery */ };
+  }
+
+  _retry() {
+    if (this.closedByUser) return;
+    const wait = this.backoff;
+    this.backoff = Math.min(this.backoff * 1.7, CFG.reconnectMaxMs);
+    this.emit('status', { state: 'retrying', wait });
+    setTimeout(() => this._open(), wait);
+  }
+
+  probe() {
+    if (!this.connected) return;
+    this.pingSentAt = performance.now();
+    this.send({ t: 'ping', c: ++this.pingSeq });
+  }
+
+  send(msg) {
+    if (!this.connected || !this.ws || this.ws.readyState !== 1) return false;
+    this.ws.send(JSON.stringify(msg));
+    return true;
+  }
+
+  close() {
+    this.closedByUser = true;
+    clearInterval(this.pingTimer);
+    if (this.ws) this.ws.close(1000, 'client closing');
+  }
+}
+
+/* ===========================================================================
+   [ 5 ]  LEVEL  --  "Corporate Floor 7"
+   ---------------------------------------------------------------------------
+   An office floor plate: cubicle farm, server rooms, glazed boardrooms, hot
+   desks, and a raised central all-hands stage. Two rules keep it both playable
+   and maintainable:
+
+     * EVERY COLLIDER IS AXIS-ALIGNED. Props are only ever rotated in multiples
+       of 90 degrees, so the Box3 that the movement solver and the ballistics
+       ray both read stays exact - no rotation matrices, and no faking a desk
+       with a bigger box.
+     * THE FLOOR PLATE IS POINT-SYMMETRIC about the origin. Every prop is built
+       twice, at (x, z) and (-x, -z). That is how a real corporate fit-out
+       mirrors its two wings, and it means neither spawn side can ever be
+       structurally favoured.
+
+   Everything that can stop a player or a bullet lands in two parallel sets:
+
+     colliders  - THREE.Box3, used by the movement solver
+     solids     - THREE.Mesh, used by the raycaster (bullets, grenades, LOS)
+   =========================================================================== */
+class Level {
+  constructor(scene) {
+    this.scene = scene;
+    this.colliders = [];   // Box3[]
+    this.solids = [];      // Mesh[] - ray targets only
+    this.spawns = [];
+    this.materials = {};
+    this.geoCache = new Map();   // dimensions -> shared BoxGeometry
+    this.ceiling = CFG.ceilingHeight;
+    this._buildMaterials();
+    this._build();
+  }
+
+  /* --- procedural textures (no image files, no network) ------------------ */
+
+  /**
+   * A square modular surface. Carpet tile, acoustic ceiling tile and vinyl are
+   * literally the same idea, so they share one generator - and the tile seam it
+   * draws is the working grid the whole floor plan is laid out on.
+   */
+  _tileTexture(opts) {
+    const S = 256;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    g.fillStyle = opts.base;
+    g.fillRect(0, 0, S, S);
+
+    // fibre / stipple noise, so long flat runs never band under the fog
+    const grain = opts.grain || 2;
+    for (let i = 0; i < opts.speckle; i++) {
+      const a = (Math.random() * opts.speckleAlpha).toFixed(3);
+      g.fillStyle = `rgba(${Math.random() > 0.5 ? '255,255,255' : '0,0,0'},${a})`;
+      g.fillRect(Math.random() * S, Math.random() * S, grain, grain);
+    }
+
+    // one tile seam per texture, on the border, so repeat count == tile count
+    g.strokeStyle = opts.seam;
+    g.lineWidth = 2;
+    g.strokeRect(1, 1, S - 2, S - 2);
+    if (opts.sub) {
+      g.strokeStyle = opts.sub;
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(S / 2, 0); g.lineTo(S / 2, S); g.stroke();
+      g.beginPath(); g.moveTo(0, S / 2); g.lineTo(S, S / 2); g.stroke();
+    }
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    return tex;
+  }
+
+  /** Painted drywall: a faint roller mottle plus scuffing along the skirting. */
+  _drywallTexture(base, scuffAlpha) {
+    const S = 256;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    g.fillStyle = base;
+    g.fillRect(0, 0, S, S);
+    for (let i = 0; i < 900; i++) {
+      const a = (Math.random() * 0.035).toFixed(3);
+      g.fillStyle = `rgba(${Math.random() > 0.5 ? '255,255,255' : '0,0,0'},${a})`;
+      g.fillRect(Math.random() * S, Math.random() * S, 3, 3);
+    }
+    // trolley and chair scuffs, low down where they actually happen
+    for (let i = 0; i < 22; i++) {
+      g.fillStyle = `rgba(46,50,56,${(scuffAlpha * Math.random()).toFixed(3)})`;
+      g.fillRect(Math.random() * S, S - 12 - Math.random() * 26, 6 + Math.random() * 34, 1 + Math.random() * 2);
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    return tex;
+  }
+
+  /** Cubicle upholstery: a woven pinstripe, which reads as fabric at range. */
+  _fabricTexture(base) {
+    const S = 128;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    g.fillStyle = base;
+    g.fillRect(0, 0, S, S);
+    for (let i = 0; i < S; i += 3) {
+      g.fillStyle = 'rgba(0,0,0,0.11)';
+      g.fillRect(i, 0, 1, S);
+      g.fillStyle = 'rgba(255,255,255,0.05)';
+      g.fillRect(0, i, S, 1);
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  /** Laminate desk tops: pale wood grain running the length of the desk. */
+  _laminateTexture() {
+    const S = 256;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    g.fillStyle = '#d7cab2';
+    g.fillRect(0, 0, S, S);
+    for (let i = 0; i < 90; i++) {
+      const y = Math.random() * S;
+      g.strokeStyle = `rgba(122,100,72,${(0.04 + Math.random() * 0.09).toFixed(3)})`;
+      g.lineWidth = 0.6 + Math.random() * 1.6;
+      g.beginPath();
+      g.moveTo(0, y);
+      g.bezierCurveTo(S * 0.3, y + (Math.random() - 0.5) * 8, S * 0.7, y + (Math.random() - 0.5) * 8, S, y);
+      g.stroke();
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  /**
+   * Objective site floor decal: painted hazard banding, corner ticks and the
+   * site letter. Opaque on purpose - a transparent slab laid flat over the
+   * carpet is one z-sorting artefact away from flickering.
+   */
+  _siteTexture(letter) {
+    const S = 256;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    g.fillStyle = '#2b323b';
+    g.fillRect(0, 0, S, S);
+
+    // hazard banding, clipped so the diagonals never paint outside the tile
+    g.save();
+    g.beginPath(); g.rect(0, 0, S, S); g.clip();
+    g.lineWidth = 15;
+    g.strokeStyle = 'rgba(214,164,64,0.34)';
+    for (let i = -S; i < S * 2; i += 42) {
+      g.beginPath(); g.moveTo(i, -S); g.lineTo(i + S + 42, S + 42); g.stroke();
+    }
+    g.restore();
+
+    // corner ticks, which is what makes it read as a marked-out zone
+    g.strokeStyle = 'rgba(255,236,196,0.8)';
+    g.lineWidth = 9;
+    const t = 52;
+    for (const [px, py, sx, sy] of [[0, 0, 1, 1], [S, 0, -1, 1], [0, S, 1, -1], [S, S, -1, -1]]) {
+      g.beginPath();
+      g.moveTo(px + sx * t, py);
+      g.lineTo(px, py);
+      g.lineTo(px, py + sy * t);
+      g.stroke();
+    }
+
+    g.fillStyle = 'rgba(255,240,206,0.9)';
+    g.font = 'bold 130px monospace';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(letter, S / 2, S / 2 + 6);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    return tex;
+  }
+
+  _buildMaterials() {
+    /* ---- floor: carpet tile - one tile per metre across the plate -------- */
+    const carpet = this._tileTexture({
+      base: '#39424e', seam: 'rgba(0,0,0,0.34)', sub: 'rgba(190,205,220,0.05)',
+      speckle: 2600, speckleAlpha: 0.05, grain: 2,
+    });
+    carpet.repeat.set(CFG.arena * 2, CFG.arena * 2);
+    this.materials.floor = new THREE.MeshStandardMaterial({ map: carpet, roughness: 0.97, metalness: 0 });
+
+    /* ---- ceiling: acoustic tile (half-metre grid) ----------------------- */
+    const tile = this._tileTexture({
+      base: '#c7ccd2', seam: 'rgba(88,96,104,0.42)', sub: 'rgba(88,96,104,0.16)',
+      speckle: 1500, speckleAlpha: 0.05, grain: 2,
+    });
+    tile.repeat.set(CFG.arena, CFG.arena);
+    this.materials.ceiling = new THREE.MeshStandardMaterial({ map: tile, roughness: 0.96, metalness: 0 });
+
+    /* ---- walls: painted drywall ----------------------------------------- */
+    const dry = this._drywallTexture('#b6bac0', 0.11);
+    dry.repeat.set(8, 2);
+    this.materials.wall = new THREE.MeshStandardMaterial({ map: dry, roughness: 0.93, metalness: 0 });
+
+    /* ---- cubicle upholstery over a steel frame -------------------------- */
+    const fabric = this._fabricTexture('#78868f');
+    fabric.repeat.set(3, 1);
+    this.materials.fabric = new THREE.MeshStandardMaterial({ map: fabric, roughness: 0.98, metalness: 0 });
+
+    /* ---- laminate desk and table tops ----------------------------------- */
+    this.materials.desk = new THREE.MeshStandardMaterial({
+      map: this._laminateTexture(), roughness: 0.42, metalness: 0.05,
+    });
+
+    /* ---- server rack / cabinetry ---------------------------------------- */
+    this.materials.rack = new THREE.MeshStandardMaterial({ color: 0x1b1f24, roughness: 0.44, metalness: 0.6 });
+    this.materials.cabinet = new THREE.MeshStandardMaterial({ color: 0x5b626a, roughness: 0.5, metalness: 0.45 });
+    this.materials.steel = new THREE.MeshStandardMaterial({ color: 0x9aa2a8, roughness: 0.35, metalness: 0.8 });
+    this.materials.baseboard = new THREE.MeshStandardMaterial({ color: 0x2b3036, roughness: 0.72, metalness: 0.1 });
+
+    /* ---- glazing ---------------------------------------------------------
+       Transparent, but still a solid ray target. That is what makes an office
+       glass wall tactically interesting: it costs nothing to see through, and
+       it still stops a bullet. */
+    this.materials.glass = new THREE.MeshStandardMaterial({
+      color: 0xbcd8e6, roughness: 0.07, metalness: 0,
+      transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide,
+    });
+    this.materials.glassFrame = new THREE.MeshStandardMaterial({ color: 0x2f353b, roughness: 0.45, metalness: 0.7 });
+
+    /* ---- unlit props -----------------------------------------------------
+       MeshBasicMaterial ignores lighting entirely, so the fluorescents, the
+       glazing band and the rack LEDs read as emitters for zero additional
+       cost and without adding a single real light to the scene. */
+    this.materials.panel = new THREE.MeshBasicMaterial({ color: 0xf0f5fb });
+    this.materials.window = new THREE.MeshBasicMaterial({ color: 0xa9c6e0 });
+    this.materials.led = new THREE.MeshBasicMaterial({ color: 0x5fdc68 });
+    this.materials.plant = new THREE.MeshStandardMaterial({ color: 0x3d6b39, roughness: 0.9, metalness: 0 });
+    this.materials.pot = new THREE.MeshStandardMaterial({ color: 0x6b6862, roughness: 0.85, metalness: 0.05 });
+    this.materials.screen = new THREE.MeshStandardMaterial({
+      color: 0x0b1620, roughness: 0.22, metalness: 0.1, emissive: 0x2f8ab5, emissiveIntensity: 0.85,
+    });
+
+    /* ---- objective site decals (one canvas per site, drawn once) --------- */
+    for (const id of ['A', 'B']) {
+      this.materials[`site${id}`] = new THREE.MeshStandardMaterial({
+        map: this._siteTexture(id), roughness: 0.95, metalness: 0,
+      });
+    }
+  }
+
+  /**
+   * Dimensions -> shared BoxGeometry. With ~200 props, most of them cut from a
+   * handful of standard sizes, this collapses the allocation count and the GPU
+   * upload count to a few dozen buffers.
+   */
+  _geometry(w, h, d) {
+    const key = `${w}|${h}|${d}`;
+    let geo = this.geoCache.get(key);
+    if (!geo) {
+      geo = new THREE.BoxGeometry(w, h, d);
+      this.geoCache.set(key, geo);
+    }
+    return geo;
+  }
+
+  /* --- the one primitive every prop in this level is cut from ------------- */
+  /**
+   * y is the BASE of the box, not its centre - that is what lets desk ->
+   * monitor -> ceiling stack as plain arithmetic.
+   *
+   * opts.rot    must be a multiple of PI/2. Width and depth swap into the
+   *             collider for the quarter turns, so the AABB stays exact.
+   * opts.solid  false keeps a purely decorative piece out of the ray target
+   *             list. This matters: grenade flight tests every solid every
+   *             frame, and the raycast lists are the only per-frame geometry
+   *             cost in the whole client.
+   */
+  box(x, y, z, w, h, d, matKey, opts = {}) {
+    const mesh = new THREE.Mesh(this._geometry(w, h, d), this.materials[matKey]);
+    mesh.position.set(x, y + h / 2, z);
+    const rot = opts.rot || 0;
+    if (rot) mesh.rotation.y = rot;
+    mesh.castShadow = opts.shadow !== false;
+    mesh.receiveShadow = opts.shadow !== false;
+    this.scene.add(mesh);
+
+    if (opts.collide !== false) {
+      const quarterTurn = Math.abs(Math.round(rot / (Math.PI / 2))) % 2 === 1;
+      const bw = quarterTurn ? d : w;
+      const bd = quarterTurn ? w : d;
+      const b = new THREE.Box3();
+      b.min.set(x - bw / 2, y, z - bd / 2);
+      b.max.set(x + bw / 2, y + h, z + bd / 2);
+      this.colliders.push(b);
+    }
+    if (opts.solid !== false) this.solids.push(mesh);
+    return mesh;
+  }
+
+  /**
+   * Build one prop twice: once as given, once point-reflected through the map
+   * centre. Every zone in this level is authored in a single wing and mirrored
+   * with this, which is why no spawn side can be structurally favoured.
+   */
+  mirrored(fn, x, z) {
+    fn(x, z, 1);
+    fn(-x, -z, -1);
+  }
+
+  _build() {
+    this._buildShell();
+    this._buildStage();
+    this._buildCubicleFarm();
+    this._buildServerRooms();
+    this._buildSites();
+    this._buildBoardrooms();
+    this._buildHotDesks();
+    this._buildCorridorProps();
+    this._buildSpawns();
+  }
+
+  /* ---- shell: carpet, suspended ceiling, walls, glazing band ------------ */
+  _buildShell() {
+    const A = CFG.arena;
+    const C = this.ceiling;
+    const W = CFG.wallHeight;
+
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(A * 2, A * 2), this.materials.floor);
+    floor.rotation.x = -Math.PI / 2;
+    floor.receiveShadow = true;
+    this.scene.add(floor);
+    this.solids.push(floor);
+    // Floor collider: a slab sunk below y=0, so its top face is exactly y=0.
+    this.colliders.push(new THREE.Box3(
+      new THREE.Vector3(-A, -2, -A),
+      new THREE.Vector3(A, 0, A)
+    ));
+
+    // Suspended ceiling. Two flags here are load-bearing:
+    //   shadow:false  - it is the only thing between the directional light and
+    //                   the entire floor, so a shadow-casting slab would black
+    //                   the whole room out.
+    //   collide:false - a full-plate collider at 4.4 m would be the topmost
+    //                   surface under every downward probe, so groundHeight()
+    //                   and spawn() would set every body down onto the roof
+    //                   instead of the carpet. It is unreachable by a jump from
+    //                   any standable surface anyway. It stays a ray TARGET, so
+    //                   upward fire and thrown utility still impact the roof.
+    this.box(0, C, 0, A * 2, 0.3, A * 2, 'ceiling', { collide: false, shadow: false });
+
+    // Recessed fluorescents on a 12 m grid. Unlit material, so they read as
+    // emitters without putting a single real light into the scene.
+    for (let ix = -2; ix <= 2; ix++) {
+      for (let iz = -2; iz <= 2; iz++) {
+        this.box(ix * 12, C - 0.07, iz * 12, 4.2, 0.06, 1.0, 'panel',
+          { collide: false, solid: false, shadow: false });
+      }
+    }
+
+    // Perimeter walls, then a skirting board and a band of glazing. The
+    // glazing is decor only: it justifies the daylight and stops the four
+    // perimeter faces reading as blank.
+    const T = 0.8;
+    this.box(0, 0, -A - T / 2, A * 2 + T * 2, W, T, 'wall');
+    this.box(0, 0,  A + T / 2, A * 2 + T * 2, W, T, 'wall');
+    this.box(-A - T / 2, 0, 0, T, W, A * 2, 'wall');
+    this.box( A + T / 2, 0, 0, T, W, A * 2, 'wall');
+
+    const skirt = 0.14;
+    this.box(0, 0, -A + 0.07, A * 2, skirt, 0.06, 'baseboard', { collide: false, solid: false, shadow: false });
+    this.box(0, 0,  A - 0.07, A * 2, skirt, 0.06, 'baseboard', { collide: false, solid: false, shadow: false });
+    this.box(-A + 0.07, 0, 0, 0.06, skirt, A * 2, 'baseboard', { collide: false, solid: false, shadow: false });
+    this.box( A - 0.07, 0, 0, 0.06, skirt, A * 2, 'baseboard', { collide: false, solid: false, shadow: false });
+
+    const winLo = 1.3, winHi = 3.1;
+    for (const z of [-A + 0.04, A - 0.04]) {
+      this.box(0, winLo, z, A * 2, winHi - winLo, 0.05, 'window',
+        { collide: false, solid: false, shadow: false });
+    }
+    for (const x of [-A + 0.04, A - 0.04]) {
+      this.box(x, winLo, 0, 0.05, winHi - winLo, A * 2, 'window',
+        { collide: false, solid: false, shadow: false });
+    }
+  }
+
+  /* ---- central all-hands stage ------------------------------------------
+     A 10 x 10 deck 1.2 m up, with a three-tread stair on each of the four
+     sides. The 0.30 m risers sit deliberately under CFG.stepHeight (0.36 m),
+     so the movement solver carries players up with no ramp special-casing.
+     This is the geometry that makes Level.move's auto-step path load-bearing,
+     and it is what the headless harness walks up. */
+  _buildStage() {
+    const H = 1.2;
+    const R = 5;
+    this.box(0, 0, 0, R * 2, H, R * 2, 'desk');
+
+    for (let i = 0; i < 3; i++) {
+      const h = (i + 1) * 0.3;
+      const off = R + 0.25 + (2 - i) * 0.5;   // flush against the deck lip
+      this.box( off, 0, 0, 0.5, h, 2.4, 'desk');
+      this.box(-off, 0, 0, 0.5, h, 2.4, 'desk');
+      this.box(0, 0,  off, 2.4, h, 0.5, 'desk');
+      this.box(0, 0, -off, 2.4, h, 0.5, 'desk');
+    }
+
+    // steel nosing around the deck lip, so the 1.2 m drop reads clearly
+    for (const [x, z, w, d] of [
+      [0, R - 0.05, R * 2, 0.1], [0, -R + 0.05, R * 2, 0.1],
+      [R - 0.05, 0, 0.1, R * 2], [-R + 0.05, 0, 0.1, R * 2],
+    ]) {
+      this.box(x, H - 0.05, z, w, 0.05, d, 'steel', { collide: false, solid: false, shadow: false });
+    }
+  }
+
+  /* ---- cubicle farm (north-east wing, mirrored south-west) --------------
+     Each pod opens toward the map centre: upholstered panels on three sides,
+     a desk against the back panel, a monitor on the desk and a task chair in
+     the mouth of the pod. `s` flips the pod's handedness for the reflected
+     wing, which is what keeps the two wings genuinely point-symmetric rather
+     than merely equal in area. */
+  _buildCubicleFarm() {
+    const COLS = [12.5, 19, 25.5];
+    const ROWS = [-27, -18];
+    const W = 4.6, D = 4.6, PH = 1.3;
+
+    const pod = (px, pz, s) => {
+      this.box(px, 0, pz - s * (D / 2 - 0.06), W, PH, 0.12, 'fabric', { shadow: false });
+      this.box(px - W / 2 + 0.06, 0, pz, 0.12, PH, D, 'fabric', { shadow: false });
+      this.box(px + W / 2 - 0.06, 0, pz, 0.12, PH, D, 'fabric', { shadow: false });
+      this.box(px, 0, pz - s * (D / 2 - 0.95), 3.0, 0.74, 1.0, 'desk');
+      this.box(px, 0.74, pz - s * (D / 2 - 1.05), 0.62, 0.4, 0.06, 'screen', { shadow: false });
+      this.box(px, 0, pz - s * (D / 2 - 2.1), 0.58, 0.62, 0.58, 'rack', { shadow: false });
+    };
+
+    for (const px of COLS) for (const pz of ROWS) this.mirrored(pod, px, pz);
+  }
+
+  /* ---- server rooms (north-west wing, mirrored south-east) -------------- */
+  _buildServerRooms() {
+    const rack = (rx, rz) => {
+      this.box(rx, 0, rz, 0.9, 2.05, 1.1, 'rack');
+      // status LEDs down the rack face: unlit, so they read as powered
+      this.box(rx, 0.3, rz + 0.57, 0.55, 1.4, 0.03, 'led',
+        { collide: false, solid: false, shadow: false });
+    };
+    for (const rx of [-29, -26, -23]) {
+      for (const rz of [-27, -24]) this.mirrored(rack, rx, rz);
+    }
+  }
+
+  /* ---- objective bomb sites --------------------------------------------
+     One marked plant zone per server room, sitting over the rack cluster in
+     each wing. The rectangles are data, not decoration: the movement of a
+     plant is "am I inside one of these", and the relay validates every plant
+     against its own copy of this same list (SITES in server.js) using the last
+     pose it received. tools/check-client.mjs fails if the two ever diverge.
+
+     The paint itself is a 2 cm slab laid straight onto the carpet, so it
+     cannot be climbed, shot or bumped into - it is a floor graphic. */
+  _buildSites() {
+    this.sites = [
+      { id: 'A', x: -26, z: -25.5, hx: 4.2, hz: 3.6 },
+      { id: 'B', x:  26, z:  25.5, hx: 4.2, hz: 3.6 },
+    ];
+    for (const s of this.sites) {
+      this.box(s.x, 0.012, s.z, s.hx * 2, 0.02, s.hz * 2, `site${s.id}`,
+        { collide: false, solid: false, shadow: false });
+    }
+  }
+
+  /* ---- glazed boardrooms ------------------------------------------------
+     Built from its two map-facing edges rather than from a centre, so that
+     handing it the reflected corner produces a correctly handed room. The
+     doorway sits at the outer end of each run, which is what makes the
+     reflection land in the matching corner. */
+  _buildBoardrooms() {
+    this._boardroom(-19, -7, -1, -1);   // north-west
+    this._boardroom(19, 7, 1, 1);       // south-east (point reflection)
+  }
+
+  _boardroom(ix, iz, dirX, dirZ) {
+    const H = 2.7;
+    const depthX = 12.6, depthZ = 12;
+    const door = 1.6;
+    const xLo = Math.min(ix, ix + dirX * depthX);
+    const xHi = Math.max(ix, ix + dirX * depthX);
+    const zLo = Math.min(iz, iz + dirZ * depthZ);
+    const zHi = Math.max(iz, iz + dirZ * depthZ);
+
+    // glazing on each map-facing side, leaving a doorway at the outer end
+    const zSeg = (zHi - zLo) - door;
+    const zMid = dirZ < 0 ? zLo + door + zSeg / 2 : zHi - door - zSeg / 2;
+    this.box(ix, 0, zMid, 0.1, H, zSeg, 'glass');
+
+    const xSeg = (xHi - xLo) - door;
+    const xMid = dirX < 0 ? xLo + door + xSeg / 2 : xHi - door - xSeg / 2;
+    this.box(xMid, 0, iz, xSeg, H, 0.1, 'glass');
+
+    // head rail, so the glazing has a visible top edge
+    this.box(ix, H, zMid, 0.14, 0.12, zSeg, 'glassFrame', { collide: false, solid: false, shadow: false });
+    this.box(xMid, H, iz, xSeg, 0.12, 0.14, 'glassFrame', { collide: false, solid: false, shadow: false });
+
+    // boardroom table and six chairs
+    const cx = (xLo + xHi) / 2 + dirX * 0.4;
+    const cz = (zLo + zHi) / 2 + dirZ * 0.4;
+    this.box(cx, 0, cz, 3.6, 0.74, 1.4, 'desk');
+    for (const dx of [-1.2, 0, 1.2]) {
+      this.box(cx + dx, 0, cz - 1.15, 0.55, 0.62, 0.55, 'rack', { shadow: false });
+      this.box(cx + dx, 0, cz + 1.15, 0.55, 0.62, 0.55, 'rack', { shadow: false });
+    }
+  }
+
+  /* ---- hot-desk benches ------------------------------------------------- */
+  _buildHotDesks() {
+    const bench = (bx, bz, s) => {
+      this.box(bx, 0, bz, 2.8, 0.74, 1.2, 'desk');
+      this.box(bx - 0.75, 0.74, bz, 0.6, 0.4, 0.06, 'screen', { shadow: false });
+      this.box(bx + 0.75, 0.74, bz, 0.6, 0.4, 0.06, 'screen', { shadow: false });
+      this.box(bx - 0.75, 0, bz + s * 1.2, 0.55, 0.62, 0.55, 'rack', { shadow: false });
+      this.box(bx + 0.75, 0, bz + s * 1.2, 0.55, 0.62, 0.55, 'rack', { shadow: false });
+    };
+    for (const bx of [-29, -25, -21]) this.mirrored(bench, bx, -3);
+  }
+
+  /* ---- corridor furniture: cabinets, cooler, vending, planting ---------- */
+  _buildCorridorProps() {
+    // filing cabinets against the north and south shell walls
+    for (const cx of [-13, -10.2]) {
+      this.mirrored((x, z) => this.box(x, 0, z, 0.8, 1.45, 0.55, 'cabinet', { shadow: false }), cx, -30.4);
+    }
+
+    // water cooler, with its bottle, on the north aisle
+    this.mirrored((x, z) => {
+      this.box(x, 0, z, 0.42, 1.05, 0.42, 'cabinet');
+      this.box(x, 1.05, z, 0.34, 0.42, 0.34, 'screen', { collide: false, solid: false, shadow: false });
+    }, -20.5, -30.6);
+
+    // vending machine in the aisle between the server room and the boardroom
+    this.mirrored((x, z) => this.box(x, 0, z, 1.15, 1.95, 0.8, 'rack', { shadow: false }), -31, -21);
+
+    // freestanding dividers, which also break the long north-south sightline
+    this.mirrored((x, z) => this.box(x, 0, z, 3.2, 1.2, 0.08, 'panel', { shadow: false }), -22, -21.6);
+
+    // planting
+    for (const [px, pz] of [[-31, -30], [10, -31], [31, 30], [-10, 31]]) {
+      this.box(px, 0, pz, 0.5, 0.45, 0.5, 'pot', { shadow: false });
+      this.box(px, 0.45, pz, 0.42, 0.9, 0.42, 'plant', { collide: false, solid: false, shadow: false });
+    }
+  }
+
+  /* ---- spawn points, all in circulation aisles -------------------------- */
+  _buildSpawns() {
+    this.spawns = [
+      new THREE.Vector3(   0, 0, -30.6),
+      new THREE.Vector3(   0, 0,  30.6),
+      new THREE.Vector3(-30.6, 0,   0),
+      new THREE.Vector3( 30.6, 0,   0),
+      new THREE.Vector3(-22.5, 0, -30.6),
+      new THREE.Vector3( 22.5, 0,  30.6),
+      new THREE.Vector3( 22.5, 0, -30.6),
+      new THREE.Vector3(-22.5, 0,  30.6),
+    ];
+  }
+
+  /**
+   * Advance and resolve one body for a single sub-step. All scalar math, no
+   * per-call allocation: this runs up to 5 times a frame for the local player.
+   *
+   *   X / Z  sweep through a box lifted by `stepHeight`, which is what gives
+   *          free auto-stepping onto kerbs, crate tops and stairs, and what
+   *          guarantees that anything the player stands on is already out of
+   *          their horizontal footprint by the time Y is evaluated.
+   *   Y      sweeps the full body with a small skin, and is what decides
+   *          grounded / ceiling contact.
+   *
+   * @param {THREE.Vector3} pos  feet position, advanced in place
+   * @param {THREE.Vector3} vel  velocity, zeroed on whichever axis was blocked
+   */
+  move(pos, vel, dt, radius, height, stepHeight) {
+    const st = { grounded: false, blockedX: false, blockedZ: false, blockedUp: false };
+    const r = radius;
+    const cols = this.colliders;
+
+    /* ---- X --------------------------------------------------------------- */
+    const dx = vel.x * dt;
+    if (dx !== 0) {
+      pos.x += dx;
+      for (let i = 0; i < cols.length; i++) {
+        const b = cols[i];
+        if (pos.x + r <= b.min.x || pos.x - r >= b.max.x) continue;
+        if (pos.y + height <= b.min.y || pos.y + stepHeight >= b.max.y) continue;
+        if (pos.z + r <= b.min.z || pos.z - r >= b.max.z) continue;
+        pos.x = dx > 0 ? b.min.x - r : b.max.x + r;
+        vel.x = 0;
+        st.blockedX = true;
+      }
+    }
+
+    /* ---- Z --------------------------------------------------------------- */
+    const dz = vel.z * dt;
+    if (dz !== 0) {
+      pos.z += dz;
+      for (let i = 0; i < cols.length; i++) {
+        const b = cols[i];
+        if (pos.x + r <= b.min.x || pos.x - r >= b.max.x) continue;
+        if (pos.y + height <= b.min.y || pos.y + stepHeight >= b.max.y) continue;
+        if (pos.z + r <= b.min.z || pos.z - r >= b.max.z) continue;
+        pos.z = dz > 0 ? b.min.z - r : b.max.z + r;
+        vel.z = 0;
+        st.blockedZ = true;
+      }
+    }
+
+    /* ---- Y --------------------------------------------------------------- */
+    const dy = vel.y * dt;
+    const descending = dy <= 0;
+    // A small skin under the feet is what detects "resting on a surface" when
+    // the body is not actually moving vertically this sub-step.
+    const skin = descending ? 0.03 : 0.02;
+    pos.y += dy;
+    for (let i = 0; i < cols.length; i++) {
+      const b = cols[i];
+      if (pos.x + r <= b.min.x || pos.x - r >= b.max.x) continue;
+      if (pos.z + r <= b.min.z || pos.z - r >= b.max.z) continue;
+      if (pos.y + height <= b.min.y || pos.y - skin >= b.max.y) continue;
+      if (descending) {
+        pos.y = b.max.y;
+        st.grounded = true;
+      } else {
+        pos.y = b.min.y - height;
+        st.blockedUp = true;
+      }
+      vel.y = 0;
+    }
+
+    return st;
+  }
+
+  /** Nearest height under a point - used for grenade rest and floor probes. */
+  groundHeight(x, z, fromY) {
+    let best = 0;
+    for (const b of this.colliders) {
+      if (x < b.min.x || x > b.max.x || z < b.min.z || z > b.max.z) continue;
+      if (b.max.y <= fromY + 0.001 && b.max.y > best) best = b.max.y;
+    }
+    return best;
+  }
+
+  spawnPoint(occupied) {
+    let best = this.spawns[0];
+    let bestScore = -1;
+    for (const p of this.spawns) {
+      let score = Infinity;
+      for (const o of occupied) score = Math.min(score, p.distanceToSquared(o));
+      if (score > bestScore) { bestScore = score; best = p; }
+    }
+    return best;
+  }
+}
+
+/* ===========================================================================
+   [ 6 ]  EFFECTS  (decals, tracers, impact puffs, smoke, flash)
+   =========================================================================== */
+
+/** Bullet holes. One shared texture, one recycled pool of quads. */
+class DecalPool {
+  constructor(scene, max) {
+    this.scene = scene;
+    this.max = max;
+    this.cursor = 0;
+
+    const S = 64;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const grd = g.createRadialGradient(S / 2, S / 2, 1, S / 2, S / 2, S / 2);
+    grd.addColorStop(0.00, 'rgba(10,10,10,0.96)');
+    grd.addColorStop(0.42, 'rgba(24,22,20,0.86)');
+    grd.addColorStop(0.62, 'rgba(120,116,108,0.55)');
+    grd.addColorStop(1.00, 'rgba(150,145,135,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, S, S);
+    // a few radiating cracks
+    g.strokeStyle = 'rgba(180,175,165,0.35)';
+    for (let i = 0; i < 6; i++) {
+      const a = Math.random() * Math.PI * 2;
+      g.beginPath();
+      g.moveTo(S / 2, S / 2);
+      g.lineTo(S / 2 + Math.cos(a) * (10 + Math.random() * 18), S / 2 + Math.sin(a) * (10 + Math.random() * 18));
+      g.stroke();
+    }
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.material = new THREE.MeshBasicMaterial({
+      map: tex, transparent: true, depthWrite: false, opacity: 0.95,
+      polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+    });
+    this.geo = new THREE.PlaneGeometry(0.26, 0.26);
+    this.items = [];
+    for (let i = 0; i < max; i++) {
+      const m = new THREE.Mesh(this.geo, this.material);
+      m.visible = false;
+      m.frustumCulled = false;
+      scene.add(m);
+      this.items.push(m);
+    }
+  }
+
+  place(point, normal, scale = 1) {
+    const m = this.items[this.cursor];
+    this.cursor = (this.cursor + 1) % this.max;
+    m.visible = true;
+    m.position.copy(point).addScaledVector(normal, 0.012);
+    m.lookAt(point.clone().add(normal));
+    m.rotateZ(Math.random() * Math.PI * 2);
+    m.scale.setScalar(scale * (0.85 + Math.random() * 0.35));
+  }
+}
+
+/** Tracer streaks: pooled cylinders stretched from muzzle to impact. */
+class TracerPool {
+  constructor(scene, max = 24) {
+    this.geo = new THREE.CylinderGeometry(0.012, 0.012, 1, 4, 1, true);
+    this.geo.translate(0, 0.5, 0); // origin at one end so we can scale along Y
+    this.material = new THREE.MeshBasicMaterial({
+      color: 0xfff0b0, transparent: true, opacity: 0.85,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+    });
+    this.items = [];
+    this.life = [];
+    this.cursor = 0;
+    for (let i = 0; i < max; i++) {
+      const m = new THREE.Mesh(this.geo, this.material.clone());
+      m.visible = false; m.frustumCulled = false;
+      scene.add(m);
+      this.items.push(m);
+      this.life.push(0);
+    }
+  }
+
+  fire(from, to) {
+    const i = this.cursor;
+    this.cursor = (this.cursor + 1) % this.items.length;
+    const m = this.items[i];
+    const dir = to.clone().sub(from);
+    const len = dir.length();
+    if (len < 0.05) return;
+    dir.normalize();
+
+    m.visible = true;
+    m.position.copy(from);
+    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+    m.scale.set(1, len, 1);
+    this.life[i] = 0.075;
+  }
+
+  update(dt) {
+    for (let i = 0; i < this.items.length; i++) {
+      if (this.life[i] <= 0) continue;
+      this.life[i] -= dt;
+      const m = this.items[i];
+      if (this.life[i] <= 0) { m.visible = false; continue; }
+      m.material.opacity = (this.life[i] / 0.075) * 0.85;
+    }
+  }
+}
+
+/** Short-lived debris burst at an impact point. */
+class ImpactPool {
+  constructor(scene, max = 90) {
+    this.geo = new THREE.PlaneGeometry(0.08, 0.08);
+    this.material = new THREE.MeshBasicMaterial({
+      color: 0xded4c0, transparent: true, opacity: 0.9,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+    });
+    const S = 32;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const grd = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    grd.addColorStop(0, 'rgba(255,250,235,1)');
+    grd.addColorStop(1, 'rgba(255,240,200,0)');
+    g.fillStyle = grd; g.fillRect(0, 0, S, S);
+    this.material.map = new THREE.CanvasTexture(c);
+    this.material.needsUpdate = true;
+
+    this.pool = [];
+    this.cursor = 0;
+    for (let i = 0; i < max; i++) {
+      const m = new THREE.Mesh(this.geo, this.material.clone());
+      m.visible = false; m.frustumCulled = false;
+      m.userData = { life: 0, vel: new THREE.Vector3() };
+      scene.add(m);
+      this.pool.push(m);
+    }
+    this.spawned = 0;
+  }
+
+  burst(point, normal, count = 5, tint = 0xded4c0) {
+    for (let i = 0; i < count; i++) {
+      const m = this.pool[this.cursor];
+      this.cursor = (this.cursor + 1) % this.pool.length;
+      m.visible = true;
+      m.material.color.setHex(tint);
+      m.position.copy(point).addScaledVector(normal, 0.03);
+      m.userData.vel.copy(normal).multiplyScalar(1.4 + Math.random() * 1.9);
+      m.userData.vel.x += (Math.random() - 0.5) * 2.2;
+      m.userData.vel.y += (Math.random() - 0.5) * 2.2 + 1.1;
+      m.userData.vel.z += (Math.random() - 0.5) * 2.2;
+      m.userData.life = 0.35 + Math.random() * 0.3;
+      m.scale.setScalar(0.6 + Math.random() * 0.9);
+    }
+  }
+
+  update(dt) {
+    for (const m of this.pool) {
+      const u = m.userData;
+      if (u.life <= 0 || !m.visible) continue;
+      u.life -= dt;
+      if (u.life <= 0) { m.visible = false; continue; }
+      u.vel.y -= 12 * dt;
+      m.position.addScaledVector(u.vel, dt);
+      m.material.opacity = clamp(u.life * 2.2, 0, 1);
+      m.lookAt(m.position.clone().addScaledVector(u.vel, 1));
+    }
+  }
+}
+
+/**
+ * Smoke cloud.
+ *
+ * The volumetric body is a cluster of transparent spheres: they keep
+ * depthWrite on, which is what makes the cloud genuinely block sightlines
+ * instead of just tinting them. A layer of soft billboards on top softens
+ * the silhouette so the cluster never reads as a pile of balls. The cloud
+ * expands over ~1.4s, holds, then fades out.
+ */
+class SmokeCloud {
+  constructor(scene, position, radius = 4.6) {
+    this.scene = scene;
+    this.position = position.clone();
+    this.radius = radius;
+    this.age = 0;
+    this.life = CFG.smokeLife;
+    this.done = false;
+
+    this.group = new THREE.Group();
+    this.group.position.copy(this.position);
+    scene.add(this.group);
+
+    /* soft sprite used both for the haze billboards and for the edge bleed */
+    const S = 128;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const grd = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    grd.addColorStop(0.0, 'rgba(214,216,212,0.95)');
+    grd.addColorStop(0.45, 'rgba(198,201,196,0.62)');
+    grd.addColorStop(1.0, 'rgba(180,184,180,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, S, S);
+    const softTex = new THREE.CanvasTexture(c);
+    this.softTex = softTex;
+
+    /* ---- solid, occluding sphere cluster -------------------------------- */
+    this.spheres = [];
+    const sphereGeo = new THREE.SphereGeometry(1, 12, 9);
+    const COUNT = 20;
+    for (let i = 0; i < COUNT; i++) {
+      const mat = new THREE.MeshLambertMaterial({
+        color: new THREE.Color().setHSL(0.25, 0.02, 0.72 + Math.random() * 0.1),
+        transparent: true,
+        opacity: 0,
+        depthWrite: true,        // <- this is what blocks sight
+        side: THREE.FrontSide,
+        fog: true,
+      });
+      const m = new THREE.Mesh(sphereGeo, mat);
+
+      // distribute inside a sphere, biased to the shell for a rounder cloud
+      const u = Math.random() * 2 - 1;
+      const th = Math.random() * Math.PI * 2;
+      const r = Math.pow(Math.random(), 0.45);
+      const s = Math.sqrt(1 - u * u);
+      m.position.set(Math.cos(th) * s * r, u * r * 0.72, Math.sin(th) * s * r);
+      m.userData = {
+        start: m.position.clone().multiplyScalar(0.18),
+        end: m.position.clone().multiplyScalar(radius * (0.55 + Math.random() * 0.5)),
+        radius: radius * (0.30 + Math.random() * 0.26),
+        spin: (Math.random() - 0.5) * 0.4,
+        rise: 0.12 + Math.random() * 0.3,
+        peak: 0.42 + Math.random() * 0.3,
+      };
+      m.scale.setScalar(0.001);
+      this.group.add(m);
+      this.spheres.push(m);
+    }
+
+    /* ---- soft haze billboards ------------------------------------------- */
+    this.sprites = [];
+    for (let i = 0; i < 14; i++) {
+      const mat = new THREE.SpriteMaterial({
+        map: softTex, transparent: true, opacity: 0, depthWrite: false,
+        color: 0xcfd2ce, fog: true,
+      });
+      const s = new THREE.Sprite(mat);
+      const dir = new THREE.Vector3(
+        Math.random() * 2 - 1, Math.random() * 1.1 - 0.25, Math.random() * 2 - 1
+      ).normalize();
+      s.position.copy(dir.multiplyScalar(radius * (0.4 + Math.random() * 0.7)));
+      s.userData = { baseScale: radius * (0.7 + Math.random() * 0.8), phase: Math.random() * 6.28 };
+      s.scale.setScalar(0.001);
+      this.group.add(s);
+      this.sprites.push(s);
+    }
+  }
+
+  /** 0..1 how deep a world point sits inside this cloud (for screen fog). */
+  containment(p) {
+    const d = p.distanceTo(this.position);
+    if (d > this.radius * 1.35) return 0;
+    const shape = this.age < 1.2 ? this.age / 1.2 : 1;
+    return clamp((1 - d / (this.radius * 1.35)) * shape * this.peakOpacity(), 0, 1);
+  }
+
+  peakOpacity() {
+    if (this.age < 1.4) return this.age / 1.4;
+    if (this.age > this.life - 3.2) return clamp((this.life - this.age) / 3.2, 0, 1);
+    return 1;
+  }
+
+  update(dt) {
+    this.age += dt;
+    if (this.age >= this.life) {
+      this.done = true;
+      return;
+    }
+    const grow = clamp(this.age / 1.4, 0, 1);
+    const ease = 1 - Math.pow(1 - grow, 3);
+    const fade = this.peakOpacity();
+
+    for (const m of this.spheres) {
+      const u = m.userData;
+      const r = lerp(0.001, u.radius, ease);
+      m.scale.setScalar(r);
+      m.position.lerpVectors(u.start, u.end, ease);
+      m.position.y += u.rise * this.age * 0.35;
+      m.rotation.y += u.spin * dt;
+      m.material.opacity = u.peak * fade * 0.82;
+    }
+
+    for (const s of this.sprites) {
+      const u = s.userData;
+      const sc = u.baseScale * (0.3 + ease * 0.9) * (1 + Math.sin(this.age * 0.9 + u.phase) * 0.05);
+      s.scale.setScalar(sc);
+      s.material.opacity = fade * 0.30;
+    }
+    this.group.rotation.y += dt * 0.06;
+  }
+
+  dispose() {
+    this.scene.remove(this.group);
+    this.group.traverse((o) => {
+      if (o.material) o.material.dispose();
+    });
+    this.softTex.dispose();
+  }
+}
+
+/* ===========================================================================
+   [ 7 ]  WEAPONS
+   ---------------------------------------------------------------------------
+   One data table drives ballistics, and one shared builder makes the low-poly
+   first-person viewmodel out of boxes so no model files are needed. Adding a
+   sixth gun is: append to WEAPONS, optionally add a `build` case.
+   =========================================================================== */
+const WEAPONS = {
+  rifle: {
+    id: 'rifle', slot: 1, label: 'AK-74 // rifle',
+    kind: 'hitscan', auto: true,
+    damage: 33, headMul: 4, limbMul: 0.62,
+    range: 120, rpm: 600, magSize: 30, reserve: 90,
+    reloadTime: 2.35, spread: 0.0042, movingSpread: 0.02, spreadGrowth: 0.0055, spreadMax: 0.085,
+    recoil: { pitch: 0.0125, yaw: 0.0042, recover: 11 },
+    kick: 0.055, aimOffset: 0.16,
+    tracer: true, volume: 1,
+  },
+  pistol: {
+    id: 'pistol', slot: 2, label: 'USP // pistol',
+    kind: 'hitscan', auto: false,
+    damage: 26, headMul: 3.4, limbMul: 0.7,
+    range: 70, rpm: 380, magSize: 20, reserve: 80,
+    reloadTime: 1.95, spread: 0.006, movingSpread: 0.028, spreadGrowth: 0.011, spreadMax: 0.1,
+    recoil: { pitch: 0.019, yaw: 0.0055, recover: 13 },
+    kick: 0.05, aimOffset: 0.12,
+    tracer: true, volume: 0.8,
+  },
+  knife: {
+    id: 'knife', slot: 3, label: 'bayonet // knife',
+    kind: 'melee', auto: true,
+    damage: 55, headMul: 1, limbMul: 1,
+    range: 2.1, rpm: 210, magSize: Infinity, reserve: Infinity,
+    reloadTime: 0, spread: 0, movingSpread: 0, spreadGrowth: 0, spreadMax: 0,
+    recoil: { pitch: 0.006, yaw: 0.002, recover: 16 },
+    kick: 0.09, aimOffset: 0.05,
+    tracer: false, volume: 0,
+  },
+  smoke: {
+    id: 'smoke', slot: 4, label: 'smoke // utility',
+    kind: 'throw', auto: false,
+    count: 2, fuse: 5, throwSpeed: 15.5, cloudRadius: 4.7,
+    reloadTime: 0,
+  },
+  flash: {
+    id: 'flash', slot: 5, label: 'flashbang // utility',
+    kind: 'throw', auto: false,
+    count: 2, fuse: 2.0, throwSpeed: 17.5, flashRange: 22,
+    reloadTime: 0,
+  },
+};
+const SLOT_ORDER = ['rifle', 'pistol', 'knife', 'smoke', 'flash'];
+
+/** Shared low-poly viewmodel builder (local space: -Z is forward). */
+function buildViewModel(id) {
+  const g = new THREE.Group();
+  const dark = new THREE.MeshStandardMaterial({ color: 0x24282a, roughness: 0.55, metalness: 0.55 });
+  const poly = new THREE.MeshStandardMaterial({ color: 0x33383a, roughness: 0.7, metalness: 0.2 });
+  const wood = new THREE.MeshStandardMaterial({ color: 0x6a4a2a, roughness: 0.75, metalness: 0.05 });
+  const steel = new THREE.MeshStandardMaterial({ color: 0x8a9195, roughness: 0.3, metalness: 0.9 });
+  const add = (w, h, d, x, y, z, mat) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z);
+    g.add(m);
+    return m;
+  };
+
+  if (id === 'rifle') {
+    add(0.075, 0.085, 0.52, 0, 0, -0.10, dark);          // receiver
+    add(0.045, 0.045, 0.46, 0, 0.012, -0.55, steel);      // barrel
+    add(0.05, 0.05, 0.07, 0, 0.012, -0.79, dark);         // muzzle brake
+    add(0.055, 0.16, 0.12, 0, -0.11, -0.02, poly);        // magazine
+    add(0.07, 0.09, 0.30, 0, -0.02, 0.26, wood);          // stock
+    add(0.04, 0.045, 0.16, 0, 0.055, -0.26, dark);        // rail
+    add(0.03, 0.03, 0.03, 0, 0.085, -0.34, steel);        // front sight
+    add(0.03, 0.05, 0.03, 0, -0.06, 0.06, poly);          // grip
+  } else if (id === 'pistol') {
+    add(0.055, 0.075, 0.30, 0, 0, -0.06, dark);           // slide
+    add(0.035, 0.035, 0.12, 0, 0.006, -0.24, steel);      // barrel
+    add(0.05, 0.05, 0.08, 0, 0.006, -0.32, dark);
+    add(0.05, 0.15, 0.09, 0, -0.10, 0.04, poly);          // grip
+    add(0.02, 0.02, 0.02, 0, 0.05, -0.19, steel);         // sight
+    add(0.03, 0.07, 0.05, 0, -0.075, -0.02, poly);        // trigger guard
+  } else if (id === 'knife') {
+    add(0.02, 0.055, 0.30, 0, 0.01, -0.20, steel);        // blade
+    add(0.024, 0.03, 0.10, 0, 0.012, -0.36, steel);       // tip taper
+    add(0.032, 0.045, 0.14, 0, -0.005, 0.01, dark);       // guard + tang
+    add(0.034, 0.038, 0.16, 0, -0.005, 0.15, poly);       // handle
+  } else if (id === 'smoke') {
+    add(0.075, 0.16, 0.075, 0, 0, -0.05, poly);
+    const cap = add(0.05, 0.03, 0.05, 0, 0.09, -0.05, steel);
+    cap.name = 'cap';
+  } else {
+    add(0.075, 0.16, 0.075, 0, 0, -0.05, dark);
+    add(0.05, 0.03, 0.05, 0, 0.09, -0.05, steel);
+  }
+
+  g.traverse((o) => { o.castShadow = false; o.receiveShadow = false; });
+  return g;
+}
+
+/* ===========================================================================
+   [ 7b ] OBJECTIVE  --  bomb defusal
+   ---------------------------------------------------------------------------
+   The relay owns the round clock and decides who won; this class owns the
+   *local* half: which site the player is standing in, the hold-to-plant /
+   hold-to-defuse channel, the armed-bomb prop and its blink. It never decides
+   an outcome - it only decides what this player is allowed to ask for, and the
+   relay re-checks that request against the last pose it received.
+   ========================================================================= */
+class Objective {
+  constructor(scene, level) {
+    this.scene = scene;
+    this.sites = level.sites;
+
+    /* --- round state, replaced by every `round` packet ------------------- */
+    this.phase = 'live';            // live | planted | ended
+    this.left = CFG.roundSeconds;
+    this.round = 1;
+    this.siteIndex = -1;            // which site the armed bomb sits on
+    this.detonated = 0;
+    this.defused = 0;
+    this.dirty = true;              // HUD text needs a re-render
+
+    /* --- local channel ---------------------------------------------------- */
+    this.channel = 0;               // 0..1 progress of the held action
+    this.channelKind = null;        // 'plant' | 'defuse'
+    this.mySite = -1;               // site the player stands in, -1 = none
+    this.canPlant = false;
+    this.canDefuse = false;
+    this._awaiting = false;         // request sent, waiting for the relay
+
+    /* --- armed-bomb prop --------------------------------------------------
+       Three boxes and one unlit LED: the LED is the only thing that animates,
+       and it does so by swapping two colours rather than touching the light
+       rig, so an armed bomb costs nothing per frame. */
+    this.bomb = new THREE.Group();
+    const shell = new THREE.MeshStandardMaterial({ color: 0x22262b, roughness: 0.48, metalness: 0.55 });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.3, 0.36), shell);
+    body.position.y = 0.15;
+    const strap = new THREE.Mesh(new THREE.BoxGeometry(0.57, 0.05, 0.4),
+      new THREE.MeshStandardMaterial({ color: 0xc8a86a, roughness: 0.85, metalness: 0.1 }));
+    strap.position.y = 0.29;
+    this.ledMat = new THREE.MeshBasicMaterial({ color: 0x3a1210 });
+    const led = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.05, 0.02), this.ledMat);
+    led.position.set(0, 0.19, 0.185);
+    this.bomb.add(body, strap, led);
+    this.bomb.visible = false;
+    scene.add(this.bomb);
+    this._blink = 0;
+  }
+
+  /** Index of the site containing a floor point, or -1. */
+  siteAt(x, z) {
+    for (let i = 0; i < this.sites.length; i++) {
+      const s = this.sites[i];
+      if (Math.abs(x - s.x) <= s.hx && Math.abs(z - s.z) <= s.hz) return i;
+    }
+    return -1;
+  }
+
+  /** Fold a `round` snapshot from the relay into the local view. */
+  applyRound(msg) {
+    const wasArmed = this.phase === 'planted';
+    if (msg.ph === 'live' || msg.ph === 'planted' || msg.ph === 'ended') this.phase = msg.ph;
+    if (Number.isFinite(msg.left)) this.left = msg.left;
+    if (Number.isFinite(msg.n)) this.round = msg.n;
+    if (Number.isFinite(msg.dt)) this.detonated = msg.dt;
+    if (Number.isFinite(msg.df)) this.defused = msg.df;
+    if (Number.isFinite(msg.si)) this.siteIndex = msg.si;
+    if (Array.isArray(msg.p)) this.arm(this.siteIndex, msg.p);
+    else if (wasArmed && this.phase !== 'planted') this.disarm();
+    this.dirty = true;
+    // Any transition out of the plant channel means the relay answered us.
+    this._awaiting = false;
+  }
+
+  /** Show the bomb at a world position (the relay picks it: the site centre). */
+  arm(siteIndex, p) {
+    this.siteIndex = siteIndex;
+    if (Array.isArray(p)) this.bomb.position.set(p[0], p[1], p[2]);
+    this.bomb.visible = true;
+    this.ledMat.color.setHex(0x3a1210);
+    this.dirty = true;
+  }
+
+  disarm() {
+    this.bomb.visible = false;
+    this.siteIndex = -1;
+    this.channel = 0;
+    this.channelKind = null;
+    this.dirty = true;
+  }
+
+  /**
+   * Per-frame: work out what this player may do, run the hold channel and fire
+   * the request when it completes. `input` is the same object the movement
+   * solver reads, so E is sampled once per frame with no extra listener.
+   */
+  update(dt, player, input, net) {
+    const px = player.position.x, pz = player.position.z;
+    const site = this.siteAt(px, pz);
+    const canPlant = this.phase === 'live' && site >= 0 && player.alive && !this._awaiting;
+    const canDefuse = this.phase === 'planted' && player.alive && !this._awaiting
+      && this.bomb.visible
+      && Math.hypot(px - this.bomb.position.x, pz - this.bomb.position.z) <= CFG.defuseRadius;
+
+    if (site !== this.mySite || canPlant !== this.canPlant || canDefuse !== this.canDefuse) {
+      this.mySite = site;
+      this.canPlant = canPlant;
+      this.canDefuse = canDefuse;
+      this.dirty = true;
+    }
+
+    const want = canDefuse ? 'defuse' : canPlant ? 'plant' : null;
+    if (!want || !input.down('KeyE')) {
+      this.channel = 0;
+      this.channelKind = null;
+      return;
+    }
+
+    if (this.channelKind !== want) { this.channelKind = want; this.channel = 0; }
+    this.channel = Math.min(1, this.channel + dt / (want === 'defuse' ? CFG.defuseSeconds : CFG.plantSeconds));
+    if (this.channel < 1) return;
+
+    // Channel complete. The relay validates the request; the local state only
+    // shows the outcome when the matching packet comes back.
+    this.channel = 0;
+    this.channelKind = null;
+    this._awaiting = true;
+    this.dirty = true;
+    if (want === 'plant') net.send({ t: 'plant', s: site });
+    else net.send({ t: 'defuse' });
+  }
+
+  /** Blink the armed LED, faster as the fuse burns down. */
+  tick(dt) {
+    if (!this.bomb.visible) return;
+    this._blink += dt;
+    const burnt = 1 - clamp(this.left / CFG.fuseSeconds, 0, 1);
+    const hz = lerp(1.2, 7.5, burnt);
+    const on = (this._blink % (2 / hz)) < (1 / hz);
+    this.ledMat.color.setHex(on ? 0xff3b2f : 0x3a1210);
+  }
+}
+
+/** Runtime state for one weapon slot. */
+class Weapon {
+  constructor(def, viewScene) {
+    this.def = def;
+    // Melee has no ammo to track, hitscan burns a magazine, throwables carry
+    // a plain count. Infinity is the sentinel for "never runs out".
+    this.ammo = def.kind === 'hitscan' ? def.magSize : def.kind === 'melee' ? Infinity : (def.count || 0);
+    this.reserve = def.reserve ?? 0;
+    this.cooldown = 0;
+    this.reloading = 0;
+    this.spread = def.spread || 0;
+    this.triggerHeld = false;
+
+    this.model = buildViewModel(def.id);
+    this.position = new THREE.Vector3(0.19, -0.19, -0.42);
+    this.model.position.copy(this.position);
+    viewScene.add(this.model);
+    this.model.visible = false;
+
+    // where tracers leave the gun
+    this.muzzle = new THREE.Object3D();
+    this.muzzle.position.set(0, 0.02, def.id === 'rifle' ? -0.82 : -0.34);
+    this.model.add(this.muzzle);
+  }
+
+  get canFire() { return this.cooldown <= 0 && this.reloading <= 0 && this.ammo > 0; }
+
+  setActive(on) { this.model.visible = on; }
+
+  startReload() {
+    if (this.def.kind !== 'hitscan') return false;
+    if (this.reloading > 0) return false;
+    if (this.ammo >= this.def.magSize) return false;
+    if (this.reserve <= 0) return false;
+    this.reloading = this.def.reloadTime;
+    return true;
+  }
+
+  finishReload() {
+    const need = this.def.magSize - this.ammo;
+    const take = Math.min(need, this.reserve);
+    this.ammo += take;
+    this.reserve -= take;
+  }
+
+  tick(dt) {
+    if (this.cooldown > 0) this.cooldown -= dt;
+    if (this.reloading > 0) {
+      this.reloading -= dt;
+      if (this.reloading <= 0) { this.reloading = 0; this.finishReload(); }
+    }
+    // spread bleeds back toward the weapon's resting accuracy
+    const rest = this.def.spread || 0;
+    this.spread = damp(this.spread, rest, 4.5, dt);
+  }
+
+  muzzleWorld(target) { return this.muzzle.getWorldPosition(target); }
+}
+
+/* ===========================================================================
+   [ 8 ]  PLAYER MODELS
+   =========================================================================== */
+
+/** A blocky operative: legs, torso, arms, head, floating name tag. */
+class RemotePlayer {
+  constructor(scene, id, name, sideIndex) {
+    this.id = id;
+    this.name = name || `PLAYER-${id}`;
+    this.sideIndex = sideIndex;
+    this.side = SIDES[sideIndex];
+    this.alive = true;
+    this.hp = 100;
+    this.weapon = 'rifle';
+    this.lastSeenAt = performance.now();
+
+    this.group = new THREE.Group();
+    scene.add(this.group);
+
+    const body = new THREE.MeshStandardMaterial({ color: this.side.color, roughness: 0.72, metalness: 0.12 });
+    const gear = new THREE.MeshStandardMaterial({ color: 0x2b312e, roughness: 0.85, metalness: 0.05 });
+    const skin = new THREE.MeshStandardMaterial({ color: 0xb08f6e, roughness: 0.8, metalness: 0 });
+    this.bodyMat = body;
+
+    const mk = (w, h, d, x, y, z, mat) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+      m.position.set(x, y, z);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      this.group.add(m);
+      return m;
+    };
+
+    mk(0.19, 0.88, 0.21, -0.12, 0.44, 0, gear);       // left leg
+    mk(0.19, 0.88, 0.21,  0.12, 0.44, 0, gear);       // right leg
+    this.torso = mk(0.52, 0.68, 0.30, 0, 1.06, 0, body);
+    mk(0.13, 0.55, 0.14, -0.33, 1.08, -0.02, body);   // left arm
+    mk(0.13, 0.55, 0.14,  0.33, 1.08, -0.02, body);   // right arm
+    this.head = mk(0.23, 0.23, 0.23, 0, 1.55, 0, skin);
+    mk(0.25, 0.10, 0.25, 0, 1.68, 0, gear);           // helmet
+
+    /* --- held weapon stub ------------------------------------------------ */
+    const gun = new THREE.Group();
+    gun.position.set(0.30, 1.12, -0.30);
+    const gm = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.09, 0.5),
+      new THREE.MeshStandardMaterial({ color: 0x22262a, roughness: 0.5, metalness: 0.6 }));
+    gun.add(gm);
+    this.gun = gun;
+    this.group.add(gun);
+
+    /* --- name tag -------------------------------------------------------- */
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 64;
+    this.tag = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: new THREE.CanvasTexture(c), transparent: true, depthTest: true, depthWrite: false, fog: false,
+    }));
+    this.tag.canvas = c;
+    this.tag.scale.set(1.5, 0.375, 1);
+    this.tag.position.set(0, 2.02, 0);
+    this.group.add(this.tag);
+    this._paintTag();
+
+    /* --- hitboxes (world space, refreshed every frame) -------------------- */
+    this.boxUpper = new THREE.Box3();
+    this.boxLower = new THREE.Box3();
+
+    /* --- interpolation buffer -------------------------------------------- */
+    this.buffer = [];
+    this.renderPos = new THREE.Vector3();
+    this.renderYaw = 0;
+    this.renderPitch = 0;
+    this.hasPose = false;
+  }
+
+  _paintTag() {
+    const c = this.tag.canvas;
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, 256, 64);
+    g.font = 'bold 30px ui-monospace, Menlo, monospace';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.lineWidth = 5;
+    g.strokeStyle = 'rgba(0,0,0,0.85)';
+    g.strokeText(this.name, 128, 34);
+    g.fillStyle = this.alive ? `#${this.side.accent.toString(16).padStart(6, '0')}` : '#8a5a5a';
+    g.fillText(this.name, 128, 34);
+    this.tag.material.map.needsUpdate = true;
+  }
+
+  applyState(msg) {
+    const now = performance.now();
+    this.lastSeenAt = now;
+    if (Array.isArray(msg.p) && msg.p.length === 3) {
+      this.buffer.push({ t: now, x: msg.p[0], y: msg.p[1], z: msg.p[2], yaw: msg.y || 0, pitch: msg.pi || 0 });
+      // keep ~1s of history, enough for a stable interpolation window
+      while (this.buffer.length > 24) this.buffer.shift();
+      if (!this.hasPose) {
+        const f = this.buffer[this.buffer.length - 1];
+        this.renderPos.set(f.x, f.y, f.z);
+        this.renderYaw = f.yaw; this.renderPitch = f.pitch;
+        this.hasPose = true;
+      }
+    }
+    if (typeof msg.hp === 'number') this.hp = msg.hp;
+    if (typeof msg.w === 'string') this.weapon = msg.w;
+    if (msg.al !== undefined) this.setAlive(msg.al !== 0);
+  }
+
+  setAlive(alive) {
+    if (this.alive === alive) return;
+    this.alive = alive;
+    // A downed operative tips over from the feet; the tween itself lives in
+    // update() so it reads as a fall rather than a teleport.
+    if (alive) this.group.rotation.x = 0;
+    this._paintTag();
+  }
+
+  /**
+   * Render ~120ms in the past and interpolate between the two surrounding
+   * snapshots. This hides jitter from packet arrival without any server-side
+   * smoothing, which is exactly what a dumb relay needs.
+   */
+  update(dt, viewPos) {
+    if (this.buffer.length >= 2 && this.alive) {
+      const renderTime = performance.now() - 120;
+      let a = this.buffer[0];
+      let b = this.buffer[this.buffer.length - 1];
+      for (let i = 0; i < this.buffer.length - 1; i++) {
+        if (this.buffer[i].t <= renderTime && this.buffer[i + 1].t >= renderTime) {
+          a = this.buffer[i]; b = this.buffer[i + 1]; break;
+        }
+      }
+      const span = Math.max(1, b.t - a.t);
+      const t = clamp((renderTime - a.t) / span, 0, 1);
+      this.renderPos.set(lerp(a.x, b.x, t), lerp(a.y, b.y, t), lerp(a.z, b.z, t));
+      let dYaw = b.yaw - a.yaw;
+      while (dYaw > Math.PI) dYaw -= Math.PI * 2;
+      while (dYaw < -Math.PI) dYaw += Math.PI * 2;
+      this.renderYaw = a.yaw + dYaw * t;
+      this.renderPitch = lerp(a.pitch, b.pitch, t);
+    }
+
+    // A downed body stops tracking: the corpse stays exactly where it fell.
+    if (this.alive) {
+      this.group.position.lerp(this.renderPos, 1 - Math.exp(-24 * dt));
+      this.group.rotation.y = this.renderYaw;
+      this.group.rotation.x = damp(this.group.rotation.x, -this.renderPitch * 0.55, 14, dt);
+    } else {
+      this.group.rotation.x = damp(this.group.rotation.x, Math.PI * 0.5, 9, dt);
+    }
+
+    // world-space hitboxes follow the smoothed body
+    const p = this.group.position;
+    this.boxUpper.min.set(p.x - 0.30, p.y + 0.72, p.z - 0.24);
+    this.boxUpper.max.set(p.x + 0.30, p.y + 1.70, p.z + 0.24);
+    this.boxLower.min.set(p.x - 0.26, p.y + 0.00, p.z - 0.20);
+    this.boxLower.max.set(p.x + 0.26, p.y + 0.72, p.z + 0.20);
+
+    // fade the tag when it is far away or the player dropped
+    if (viewPos) {
+      const d = p.distanceTo(viewPos);
+      this.tag.material.opacity = clamp(1.2 - d / 60, 0.25, 1) * (this.alive ? 1 : 0.45);
+      const s = clamp(d / 14, 0.5, 2.2);
+      this.tag.scale.set(1.5 * s, 0.375 * s, 1);
+    }
+  }
+
+  dispose() {
+    this.group.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) o.material.dispose();
+    });
+    this.group.parent?.remove(this.group);
+  }
+}
+
+/* ===========================================================================
+   [ 9 ]  LOCAL PLAYER + INPUT
+   =========================================================================== */
+class Input {
+  constructor() {
+    this.keys = new Set();
+    this.mouse = { down: false, dx: 0, dy: 0 };
+    this.locked = false;
+    this.wheel = 0;
+  }
+
+  attach(canvas, hooks) {
+    window.addEventListener('keydown', (e) => {
+      if (e.repeat) { return; }
+      this.keys.add(e.code);
+      hooks.onKey?.(e);
+    });
+    window.addEventListener('keyup', (e) => {
+      this.keys.delete(e.code);
+      hooks.onKeyUp?.(e);
+    });
+    window.addEventListener('blur', () => this.keys.clear());
+
+    document.addEventListener('pointerlockchange', () => {
+      this.locked = document.pointerLockElement === canvas;
+      hooks.onLockChange?.(this.locked);
+    });
+    document.addEventListener('pointerlockerror', () => hooks.onLockError?.());
+
+    document.addEventListener('mousemove', (e) => {
+      if (!this.locked) return;
+      this.mouse.dx += e.movementX || 0;
+      this.mouse.dy += e.movementY || 0;
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+      if (!this.locked) return;
+      if (e.button === 0) { this.mouse.down = true; hooks.onFire?.(); }
+      if (e.button === 2) hooks.onAltFire?.();
+    });
+    window.addEventListener('mouseup', (e) => { if (e.button === 0) this.mouse.down = false; });
+    window.addEventListener('contextmenu', (e) => e.preventDefault());
+    window.addEventListener('wheel', (e) => { this.wheel += e.deltaY; }, { passive: true });
+  }
+
+  down(code) { return this.keys.has(code); }
+  consumeMouse() {
+    const d = { dx: this.mouse.dx, dy: this.mouse.dy };
+    this.mouse.dx = 0; this.mouse.dy = 0;
+    return d;
+  }
+}
+
+class LocalPlayer {
+  constructor(level) {
+    this.level = level;
+    this.position = new THREE.Vector3(0, 0, 0);   // feet
+    this.velocity = new THREE.Vector3();
+    this.yaw = 0;
+    this.pitch = 0;
+    this.grounded = false;
+    this.crouching = false;
+    this.height = CFG.height;
+    this.eye = CFG.eyeHeight;
+    this.hp = 100;
+    this.alive = true;
+    this.bob = 0;
+    this.stepPhase = 0;
+    this.recoilPitch = 0;
+    this.recoilYaw = 0;
+    this.landKick = 0;
+  }
+
+  spawn(pos) {
+    this.position.copy(pos);
+    this.position.y = this.level.groundHeight(pos.x, pos.z, 100) + 0.02;
+    this.velocity.set(0, 0, 0);
+    this.hp = 100;
+    this.alive = true;
+    this.pitch = 0;
+    this.recoilPitch = 0;
+    this.recoilYaw = 0;
+    this.landKick = 0;
+  }
+
+  look(dx, dy) {
+    this.yaw -= dx * CFG.sensitivity;
+    this.pitch -= dy * CFG.sensitivity * (CFG.invertY ? -1 : 1);
+    // Hard clamp: without this a flick past vertical mirrors the camera.
+    this.pitch = clamp(this.pitch, -CFG.pitchLimit, CFG.pitchLimit);
+    // keep yaw in a sane range so the float never loses precision over a
+    // long match of continuous spinning
+    if (this.yaw > Math.PI) this.yaw -= Math.PI * 2;
+    else if (this.yaw < -Math.PI) this.yaw += Math.PI * 2;
+  }
+
+  addRecoil(pitch, yaw) {
+    this.recoilPitch += pitch;
+    this.recoilYaw += yaw;
+  }
+
+  update(dt, input) {
+    /* ---- crouch ---------------------------------------------------------- */
+    const wantCrouch = input.down('ControlLeft') || input.down('ControlRight') || input.down('KeyC');
+    this.crouching = wantCrouch && this.grounded;
+    const targetH = this.crouching ? CFG.crouchHeight : CFG.standHeight;
+    this.height = damp(this.height, targetH, 14, dt);
+    this.eye = damp(this.eye, this.crouching ? CFG.eyeHeight * 0.62 : CFG.eyeHeight, 14, dt);
+
+    /* ---- wish direction in the yaw frame --------------------------------- */
+    const f = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+    const r = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const wish = new THREE.Vector3();
+    if (input.down('KeyW')) wish.add(f);
+    if (input.down('KeyS')) wish.sub(f);
+    if (input.down('KeyD')) wish.add(r);
+    if (input.down('KeyA')) wish.sub(r);
+    const wishLen = wish.length();
+    if (wishLen > 0) wish.multiplyScalar(1 / wishLen);
+
+    const walking = input.down('ShiftLeft') || input.down('ShiftRight');
+    const maxSpeed = this.crouching ? CFG.crouchSpeed : walking ? CFG.walkSpeed : CFG.runSpeed;
+
+    /* ---- ground / air acceleration --------------------------------------- */
+    if (this.alive) {
+      if (this.grounded) {
+        // friction first, then accel: gives crisp CS-like counter-strafing
+        const speed = Math.hypot(this.velocity.x, this.velocity.z);
+        if (speed > 0) {
+          const drop = speed * CFG.friction * dt;
+          const scale = Math.max(0, speed - drop) / speed;
+          this.velocity.x *= scale;
+          this.velocity.z *= scale;
+        }
+        if (wishLen > 0) {
+          const accel = CFG.groundAccel * dt * maxSpeed;
+          this.velocity.x += wish.x * accel;
+          this.velocity.z += wish.z * accel;
+          const s = Math.hypot(this.velocity.x, this.velocity.z);
+          if (s > maxSpeed) {
+            this.velocity.x *= maxSpeed / s;
+            this.velocity.z *= maxSpeed / s;
+          }
+        }
+      } else if (wishLen > 0) {
+        const accel = CFG.airAccel * dt * maxSpeed;
+        this.velocity.x += wish.x * accel;
+        this.velocity.z += wish.z * accel;
+      }
+    } else {
+      this.velocity.x = damp(this.velocity.x, 0, 8, dt);
+      this.velocity.z = damp(this.velocity.z, 0, 8, dt);
+    }
+
+    /* ---- jump ------------------------------------------------------------ */
+    if (this.alive && input.down('Space') && this.grounded && !this.crouching) {
+      this.velocity.y = CFG.jumpSpeed;
+      this.grounded = false;
+    }
+
+    /* ---- gravity --------------------------------------------------------- */
+    if (!this.grounded || this.velocity.y > 0) {
+      this.velocity.y -= CFG.gravity * dt;
+      if (this.velocity.y < -55) this.velocity.y = -55;
+    }
+
+    /* ---- integrate + collide ---------------------------------------------
+       Sub-stepped so that a long frame (or a fast fall) can never tunnel the
+       body through a platform, and so friction is applied on a stable step. */
+    const wasGrounded = this.grounded;
+    const impactSpeed = this.velocity.y;
+    const steps = Math.max(1, Math.min(5, Math.ceil(dt / (1 / 120))));
+    const h = dt / steps;
+    let grounded = false;
+    for (let i = 0; i < steps; i++) {
+      const st = this.level.move(this.position, this.velocity, h, CFG.radius, this.height, CFG.stepHeight);
+      if (st.grounded) grounded = true;
+    }
+    this.grounded = grounded;
+    if (this.grounded) {
+      if (!wasGrounded) this.landKick = clamp(-impactSpeed * 0.012, 0, 0.16);
+      if (this.velocity.y < 0) this.velocity.y = 0;
+    }
+
+    /* ---- bob ------------------------------------------------------------- */
+    const planar = Math.hypot(this.velocity.x, this.velocity.z);
+    if (this.grounded && planar > 0.6) {
+      this.stepPhase += dt * planar * 1.5;
+      this.bob = damp(this.bob, Math.sin(this.stepPhase) * 0.028 * (planar / CFG.runSpeed), 12, dt);
+    } else {
+      this.bob = damp(this.bob, 0, 8, dt);
+    }
+    this.landKick = damp(this.landKick, 0, 8, dt);
+
+    /* ---- recoil recovery -------------------------------------------------- */
+    this.recoilPitch = damp(this.recoilPitch, 0, 11, dt);
+    this.recoilYaw = damp(this.recoilYaw, 0, 11, dt);
+
+    /* ---- hard arena clamp as a safety net --------------------------------- */
+    const lim = CFG.arena + 6;
+    this.position.x = clamp(this.position.x, -lim, lim);
+    this.position.z = clamp(this.position.z, -lim, lim);
+    if (this.position.y < -6) { this.position.set(0, 2, 0); this.velocity.set(0, 0, 0); }
+
+    return { planar };
+  }
+}
+
+/* ===========================================================================
+   [ 10 ] HUD
+   =========================================================================== */
+class Hud {
+  constructor(game) {
+    this.game = game;
+    this.el = {
+      ch: document.getElementById('ch'),
+      hitmarker: document.getElementById('hitmarker'),
+      hp: document.getElementById('hp'),
+      hpbar: document.querySelector('#hpbar i'),
+      mag: document.querySelector('#ammo .mag'),
+      res: document.querySelector('#ammo .res'),
+      ammo: document.getElementById('ammo'),
+      wname: document.getElementById('wname'),
+      reload: document.getElementById('reload'),
+      conn: document.getElementById('conn'),
+      ping: document.getElementById('ping'),
+      pcount: document.getElementById('pcount'),
+      pid: document.getElementById('pid'),
+      slots: document.getElementById('slotbar'),
+      killfeed: document.getElementById('killfeed'),
+      scoreboard: document.getElementById('scoreboard'),
+      sbRows: document.getElementById('sb-rows'),
+      sbEmpty: document.getElementById('sb-empty'),
+      sbRound: document.getElementById('sb-round'),
+      sbPhase: document.getElementById('sb-phase'),
+      sbClock: document.getElementById('sb-clock'),
+      sbDetonated: document.getElementById('sb-detonated'),
+      sbDefused: document.getElementById('sb-defused'),
+      objective: document.getElementById('objective'),
+      objClock: document.getElementById('obj-clock'),
+      objStrip: document.getElementById('obj-strip'),
+      objTrack: document.getElementById('obj-track'),
+      objPrompt: document.getElementById('obj-prompt'),
+      flash: document.getElementById('flash-overlay'),
+      smoke: document.getElementById('smoke-overlay'),
+      damage: document.getElementById('damage-overlay'),
+      dead: document.getElementById('deadscreen'),
+      deathBy: document.getElementById('death-by'),
+      respawn: document.getElementById('respawn-count'),
+      note: document.getElementById('conn-note'),
+      note2: document.getElementById('conn-note-2'),
+    };
+    this.hitMarkerTimer = 0;
+    this.damageTimer = 0;
+    this.flashLevel = 0;
+    this.smokeLevel = 0;
+    this._objClock = '';
+    this._buildSlots();
+  }
+
+  /**
+   * Objective strip: the round clock, what the round is currently waiting for,
+   * and how far through a plant / defuse this player is. Called only when the
+   * state actually changes (Objective.dirty) plus once a second for the clock,
+   * so holding Tab or standing in a site costs no per-frame DOM writes.
+   */
+  renderObjective(game) {
+    const o = game.objective;
+    const siteTag = o.siteIndex >= 0 ? `site ${o.sites[o.siteIndex].id}` : 'site --';
+    let strip;
+    if (o.phase === 'planted') strip = `\u2022 bomb armed \u2014 ${siteTag} \u2014 defuse or hold out`;
+    else if (o.phase === 'ended') strip = '\u2022 round over \u2014 regrouping';
+    else if (o.canPlant) strip = `\u2022 in ${siteTag} \u2014 hold E to arm`;
+    else strip = '\u2022 plant zones: server rooms NW / SE';
+    this.el.objStrip.textContent = strip;
+    this.el.objective.classList.toggle('armed', o.phase === 'planted');
+
+    let prompt = '';
+    if (o.canDefuse) prompt = 'hold E to defuse';
+    else if (o.canPlant) prompt = 'hold E to plant';
+    this.el.objPrompt.textContent = prompt;
+    this.el.objPrompt.classList.toggle('on', prompt !== '');
+
+    this.el.sbRound.textContent = String(o.round);
+    this.el.sbPhase.textContent = o.phase;
+    this.el.sbDetonated.textContent = String(o.detonated);
+    this.el.sbDefused.textContent = String(o.defused);
+  }
+
+  static clockText(seconds) {
+    const s = Math.max(0, Math.ceil(seconds));
+    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  _buildSlots() {
+    this.el.slots.innerHTML = '';
+    this.slotEls = {};
+    for (const id of SLOT_ORDER) {
+      const def = WEAPONS[id];
+      const div = document.createElement('div');
+      div.className = 'slot';
+      const n = document.createElement('div');
+      n.className = 'n';
+      n.textContent = String(def.slot);
+      const l = document.createElement('div');
+      l.className = 'l';
+      l.textContent = def.kind === 'throw' ? (id === 'smoke' ? 'smoke' : 'flash') : id;
+      div.append(n, l);
+      this.el.slots.appendChild(div);
+      this.slotEls[id] = div;
+    }
+  }
+
+  hitMarker(kill) {
+    this.hitMarkerTimer = kill ? 0.42 : 0.24;
+    this.el.hitmarker.classList.toggle('kill', !!kill);
+  }
+
+  damageFlash(amount) {
+    this.damageTimer = Math.max(this.damageTimer, clamp(amount / 45, 0.3, 1));
+  }
+
+  addFlash(level) { this.flashLevel = Math.max(this.flashLevel, clamp(level, 0, 1)); }
+
+  killFeed(attacker, victim, weapon, involvedMe) {
+    const row = document.createElement('div');
+    row.className = 'kf';
+    const a = document.createElement('span');
+    a.className = involvedMe ? 'me' : '';
+    a.textContent = attacker;
+    const w = document.createElement('span');
+    w.className = 'w';
+    w.textContent = weapon || '?';
+    const v = document.createElement('span');
+    v.className = 'vic';
+    v.textContent = victim;
+    row.append(a, w, v);
+    this.el.killfeed.appendChild(row);
+    setTimeout(() => row.remove(), 6500);
+    while (this.el.killfeed.children.length > 6) this.el.killfeed.firstChild.remove();
+  }
+
+  setScores(rows) {
+    // rows: [ [id, kills, deaths], ... ]
+    this._scores = rows;
+  }
+
+  renderScoreboard(game) {
+    const rows = game.scoreRows();
+    const me = game.net.id;
+    this.el.sbRows.innerHTML = '';
+    for (const r of rows) {
+      const tr = document.createElement('tr');
+      if (r.id === me) tr.className = 'me';
+      const td = (text, cls) => {
+        const c = document.createElement('td');
+        if (cls) c.className = cls;
+        c.textContent = text;
+        return c;
+      };
+      const side = SIDES[hashInt(String(r.id)) % 2];
+      const sideCell = td(side.tag);
+      sideCell.className = side.tag === 'CT' ? 'ct' : 't';
+      tr.append(td(r.name), sideCell, td(String(r.kills), 'num'), td(String(r.deaths), 'num'),
+                td(String(r.ping), 'num'));
+      this.el.sbRows.appendChild(tr);
+    }
+    this.el.sbEmpty.style.display = rows.length > 1 ? 'none' : 'block';
+  }
+
+  update(dt, game) {
+    const p = game.player;
+    const w = game.weapon;
+
+    /* ---- crosshair: gap tracks current inaccuracy ------------------------ */
+    const spread = (w.def.spread || 0) + (w.def.spreadGrowth ? w.spread * 1.6 : 0);
+    const moving = Math.hypot(p.velocity.x, p.velocity.z) / CFG.runSpeed;
+    const gap = clamp(3 + spread * 900 + moving * 10, 3, 44);
+    this.el.ch.style.setProperty('--gap', `${gap.toFixed(1)}px`);
+    this.el.ch.classList.toggle('hidden', !p.alive || !game.running);
+
+    /* ---- hit marker ------------------------------------------------------ */
+    if (this.hitMarkerTimer > 0) {
+      this.hitMarkerTimer -= dt;
+      const t = clamp(this.hitMarkerTimer / 0.24, 0, 1);
+      this.el.hitmarker.style.opacity = String(t);
+      const s = 1 + (1 - t) * 0.7;
+      this.el.hitmarker.style.transform = `scale(${s.toFixed(2)})`;
+    } else {
+      this.el.hitmarker.style.opacity = '0';
+    }
+
+    /* ---- vitals ---------------------------------------------------------- */
+    this.el.hp.textContent = String(Math.max(0, Math.round(p.hp)));
+    this.el.hp.className = p.hp > 60 ? '' : p.hp > 25 ? 'hurt' : 'crit';
+    this.el.hpbar.style.width = `${clamp(p.hp, 0, 100)}%`;
+    this.el.hpbar.style.background = p.hp > 60 ? 'var(--ok)' : p.hp > 25 ? 'var(--amber)' : 'var(--danger)';
+
+    const kind = w.def.kind;
+    if (kind === 'hitscan') {
+      this.el.mag.textContent = String(w.ammo);
+      this.el.res.textContent = ` / ${w.reserve}`;
+    } else if (kind === 'melee') {
+      this.el.mag.textContent = '\u221e';
+      this.el.res.textContent = '';
+    } else {
+      this.el.mag.textContent = String(w.ammo);
+      this.el.res.textContent = ' left';
+    }
+    this.el.ammo.className =
+      (kind === 'hitscan' && w.ammo <= Math.max(3, w.def.magSize * 0.2)) ? 'low' : '';
+    this.el.wname.textContent = w.def.label;
+    this.el.reload.textContent = w.reloading > 0 ? 'reloading'
+      : (kind === 'hitscan' && w.ammo === 0 ? 'press R' : '');
+
+    /* ---- slots ------------------------------------------------------------ */
+    for (const id of SLOT_ORDER) {
+      const el = this.slotEls[id];
+      el.classList.toggle('active', game.inventory.current === id);
+      const def = WEAPONS[id];
+      el.classList.toggle('empty', def.kind === 'throw' && game.inventory.items[id].ammo <= 0);
+    }
+
+    /* ---- objective strip --------------------------------------------------
+       The clock is the only value that ticks at display rate, and it is written
+       exactly once per second change; everything else is event-driven via
+       Objective.dirty, so a steady frame writes no DOM at all here. */
+    const obj = game.objective;
+    const clock = Hud.clockText(obj.left);
+    if (clock !== this._objClock) {
+      this._objClock = clock;
+      this.el.objClock.textContent = clock;
+      this.el.sbClock.textContent = clock;
+    }
+    if (obj.dirty) { obj.dirty = false; this.renderObjective(game); }
+    const channelOn = obj.channelKind !== null && obj.channel > 0.001;
+    this.el.objTrack.classList.toggle('on', channelOn);
+    if (channelOn) {
+      this.el.objTrack.classList.toggle('defuse', obj.channelKind === 'defuse');
+      this.el.objTrack.firstElementChild.style.width = `${(obj.channel * 100).toFixed(0)}%`;
+    }
+
+    /* ---- network panel ---------------------------------------------------- */
+    const net = game.net;
+    const conn = this.el.conn;
+    if (net.connected) {
+      conn.textContent = 'online'; conn.className = 'v online';
+      this.el.ping.textContent = `${net.ping}ms`;
+    } else {
+      conn.textContent = net.statusState === 'connecting' ? 'link...' : 'offline';
+      conn.className = 'v ' + (net.statusState === 'connecting' ? 'offline' : 'dead');
+      this.el.ping.textContent = '--';
+    }
+    this.el.pcount.textContent = String(1 + game.remotes.size);
+    this.el.pid.textContent = net.id || '--';
+
+    /* ---- screen effect layers --------------------------------------------- */
+    if (this.damageTimer > 0) {
+      this.damageTimer -= dt;
+      this.el.damage.style.opacity = String(clamp(this.damageTimer * 1.6, 0, 1) * 0.9);
+    } else this.el.damage.style.opacity = '0';
+
+    if (this.flashLevel > 0) {
+      this.flashLevel = Math.max(0, this.flashLevel - dt * 0.42);
+      this.el.flash.style.opacity = String(clamp(this.flashLevel, 0, 1));
+      if (this.flashLevel > 0.02) this.el.flash.style.opacity = String(Math.pow(this.flashLevel, 0.7));
+    } else this.el.flash.style.opacity = '0';
+
+    /* smoke: the screen greys out proportionally to how deep inside a cloud
+       the camera currently sits, which is the client-side meaning of
+       "blocking player vision paths". */
+    let deepest = 0;
+    const eye = game.camera.position;
+    for (const s of game.smokes) {
+      const c = s.containment(eye);
+      if (c > deepest) deepest = c;
+    }
+    this.smokeLevel = damp(this.smokeLevel, deepest, 6, dt);
+    this.el.smoke.style.opacity = String(clamp(this.smokeLevel * 0.95, 0, 0.94));
+
+    /* ---- death screen ------------------------------------------------------ */
+    this.el.dead.classList.toggle('on', !p.alive);
+    if (!p.alive) this.el.respawn.textContent = String(Math.max(0, Math.ceil(game.respawnTimer)));
+  }
+
+  setNote(text, cls) {
+    this.el.note.textContent = text;
+    this.el.note.className = cls || '';
+  }
+  setNote2(text) { this.el.note2.textContent = text; }
+}
+
+/* ===========================================================================
+   [ 11 ] GAME
+   =========================================================================== */
+class Game {
+  constructor() {
+    this.input = new Input();
+    this.remotes = new Map();     // id -> RemotePlayer
+    this.smokes = [];
+    this.grenades = [];
+    this.running = false;
+    this.respawnTimer = 0;
+    this.lastHitBy = null;
+    this.fps = 0;
+    this._netAccum = 0;
+    this._lastSent = null;
+    this.scoreboardRows = [];
+    this._acc = 0;
+    this._frames = 0;
+  }
+
+  /* ------------------------------------------------------------------ boot */
+  init() {
+    /* --- renderer ------------------------------------------------------- */
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true, powerPreference: 'high-performance', stencil: false,
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.14;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.autoClear = true;
+    document.body.appendChild(renderer.domElement);
+    this.renderer = renderer;
+
+    /* --- two scenes ------------------------------------------------------
+       The world scene is the map; the view scene holds only the first-person
+       weapon. Rendering them as two passes with a depth clear between them
+       is the standard fix for a viewmodel that would otherwise clip into
+       walls when you stand close to one. */
+    this.scene = new THREE.Scene();
+    // Interior: the background is almost entirely hidden by the ceiling, and
+    // the fog is now a short office haze rather than outdoor distance fade. Its
+    // colour matches the carpet, so far surfaces dissolve into the room's own
+    // tone instead of into a distant sky.
+    this.scene.background = new THREE.Color(0x0d1015);
+    this.scene.fog = new THREE.Fog(0x3a434e, 30, 108);
+
+    this.camera = new THREE.PerspectiveCamera(CFG.fov, window.innerWidth / window.innerHeight, CFG.near, CFG.far);
+    this.camera.rotation.order = 'YXZ';
+    this.scene.add(this.camera);
+
+    this.viewScene = new THREE.Scene();
+    this.viewCamera = new THREE.PerspectiveCamera(CFG.fov + 6, window.innerWidth / window.innerHeight, 0.01, 12);
+
+    /* --- lighting ---------------------------------------------------------
+       An interior rig. The ceiling deliberately does not cast shadow (see
+       Level._buildShell), so the directional light still reaches the floor and
+       behaves like daylight falling through the glazing, while the hemisphere
+       stands in for bounce off the ceiling tiles and the carpet. The emissive
+       light panels are unlit geometry, not lights, so none of this costs a
+       single additional light slot. */
+    const hemi = new THREE.HemisphereLight(0xdce8f4, 0x39424e, 1.3);
+    this.scene.add(hemi);
+
+    const sun = new THREE.DirectionalLight(0xfff3e2, 1.95);
+    sun.position.set(30, 46, 18);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.near = 1;
+    sun.shadow.camera.far = 140;
+    // Tight to the plate: a smaller ortho frustum is more shadow texels per
+    // metre, which is what keeps the cubicle panels' shadows crisp.
+    const S = CFG.arena + 2;
+    sun.shadow.camera.left = -S;
+    sun.shadow.camera.right = S;
+    sun.shadow.camera.top = S;
+    sun.shadow.camera.bottom = -S;
+    sun.shadow.bias = -0.0008;
+    sun.shadow.normalBias = 0.02;
+    this.scene.add(sun);
+    this.sun = sun;
+
+    // ambient fill so the inside faces of cubicles do not read as pure black
+    this.scene.add(new THREE.AmbientLight(0x556070, 0.6));
+
+    // the viewmodel is lit by a simple rig of its own
+    const vKey = new THREE.DirectionalLight(0xffffff, 2.6);
+    vKey.position.set(-0.6, 1.2, 0.9);
+    this.viewScene.add(vKey);
+    this.viewScene.add(new THREE.AmbientLight(0xffffff, 0.85));
+
+    /* --- muzzle light (reused, toggled) ------------------------------------ */
+    this.muzzleLight = new THREE.PointLight(0xffd79a, 0, 9, 2);
+    this.scene.add(this.muzzleLight);
+    this.muzzleLightTimer = 0;
+
+    /* --- world ------------------------------------------------------------
+       NOTE: Level is constructed before the weapon so the spawn search has
+       colliders available. */
+    this.level = new Level(this.scene);
+    this.decals = new DecalPool(this.scene, CFG.maxDecals);
+    this.tracers = new TracerPool(this.scene, 24);
+    this.impacts = new ImpactPool(this.scene, 110);
+
+    /* --- player + inventory ------------------------------------------------ */
+    this.player = new LocalPlayer(this.level);
+    this.inventory = {
+      current: 'rifle',
+      items: {},
+    };
+    for (const id of SLOT_ORDER) this.inventory.items[id] = new Weapon(WEAPONS[id], this.viewScene);
+    this.inventory.items.rifle.setActive(true);
+    this.weapon = this.inventory.items.rifle;
+
+    /* --- match objective --------------------------------------------------- */
+    this.objective = new Objective(this.scene, this.level);
+
+    /* --- shared scratch objects (avoid per-frame allocation) --------------- */
+    this._ray = new THREE.Raycaster();
+    this._ray.far = 200;
+    this._v1 = new THREE.Vector3();
+    this._v2 = new THREE.Vector3();
+    this._v3 = new THREE.Vector3();
+    this._forward = new THREE.Vector3();
+    this._muzzleWorld = new THREE.Vector3();
+
+    /* --- hud + network ----------------------------------------------------- */
+    this.hud = new Hud(this);
+    this.net = new NetClient(resolveEndpoint());
+    this._wireNetwork();
+
+    /* --- input hooks ------------------------------------------------------- */
+    this.input.attach(renderer.domElement, {
+      onKey: (e) => this._onKeyDown(e),
+      onLockChange: (locked) => this._onLockChange(locked),
+      onFire: () => this._pullTrigger(),
+      onAltFire: () => {},
+    });
+
+    window.addEventListener('resize', () => this._onResize());
+    this._onResize();
+
+    /* --- start screen wiring ----------------------------------------------- */
+    this.overlay = document.getElementById('overlay');
+    this.paused = document.getElementById('paused');
+    const nameInput = document.getElementById('start-name');
+    nameInput.value = localStorage.getItem('csb.name') || '';
+
+    document.getElementById('start-btn').addEventListener('click', () => this._deploy());
+    document.getElementById('resume-btn').addEventListener('click', () => this._requestLock());
+    document.getElementById('sens-btn').addEventListener('click', () => {
+      const next = Math.round((CFG.sensitivity * 1000) / 0.5) + 1;
+      CFG.sensitivity = clamp(next * 0.0005, 0.0005, 0.006);
+      document.getElementById('sens-val').textContent = (CFG.sensitivity / 0.0021).toFixed(1);
+      localStorage.setItem('csb.sens', String(CFG.sensitivity));
+    });
+    const savedSens = Number(localStorage.getItem('csb.sens'));
+    if (savedSens > 0) CFG.sensitivity = savedSens;
+    document.getElementById('sens-val').textContent = (CFG.sensitivity / 0.0021).toFixed(1);
+
+    this.player.spawn(this.level.spawnPoint([]));
+
+    /* --- go ---------------------------------------------------------------- */
+    document.getElementById('boot').hidden = true;
+    this.net.connect();
+    this.last = performance.now();
+    this._loop();
+  }
+
+  /* --------------------------------------------------------------- network */
+  _wireNetwork() {
+    const net = this.net;
+
+    net.on('status', (s) => {
+      net.statusState = s.state;
+      if (s.state === 'online') {
+        this.hud.setNote('relay connected \u2014 click to deploy');
+      } else if (s.state === 'retrying') {
+        this.hud.setNote(`relay unreachable \u2014 retrying in ${(s.wait / 1000).toFixed(1)}s (playing offline)`, 'err');
+      } else if (s.state === 'dead') {
+        this.hud.setNote('relay link lost \u2014 playing offline, reconnecting\u2026', 'err');
+      }
+      if (s.detail) this.hud.setNote(`relay error: ${s.detail}`, 'err');
+      this.hud.setNote2(net.connected ? `relay: online  -  ping ${net.ping}ms` : 'relay: offline (solo practice)');
+    });
+
+    net.on('open', () => {
+      net.send({ t: 'hello', n: (localStorage.getItem('csb.name') || 'OPERATIVE').slice(0, 16) });
+    });
+
+    net.on('welcome', (msg) => {
+      for (const p of msg.players || []) {
+        if (p.i === net.id) continue;
+        this._addRemote(p.i, p.n, p.s);
+      }
+      this.scoreboardRows = msg.scores || [];
+      this.hud.setNote('relay connected \u2014 click to deploy');
+    });
+
+    net.on('join', (msg) => {
+      if (msg.id === net.id) return;
+      const r = this._addRemote(msg.id, msg.n, null);
+      this.hud.killFeed(`${msg.n || 'OPERATIVE'}`, 'joined', 'net', false);
+      void r;
+    });
+
+    net.on('leave', (msg) => {
+      const r = this.remotes.get(msg.id);
+      if (r) { r.dispose(); this.remotes.delete(msg.id); }
+      if (msg.s) this.scoreboardRows = msg.s;
+    });
+
+    net.on('move', (msg) => {
+      const r = this.remotes.get(msg.id);
+      if (r) r.applyState(msg);
+    });
+
+    net.on('fire', (msg) => this._remoteFireEffect(msg));
+
+    net.on('hit', (msg) => {
+      if (msg.v !== net.id) return;                 // not aimed at me
+      this._takeDamage(msg);
+    });
+
+    net.on('death', (msg) => {
+      const victim = this.remotes.get(msg.id);
+      const me = msg.id === net.id;
+      const killer = msg.by === net.id ? 'you' : (this.remotes.get(msg.by)?.name || msg.by || 'world');
+      const victimName = me ? 'you' : (victim?.name || msg.id);
+      this.hud.killFeed(killer, victimName, msg.w || 'rifle', msg.by === net.id || me);
+      if (victim) victim.setAlive(false);
+      if (msg.s) this.scoreboardRows = msg.s;
+      if (msg.by === net.id && !me) { this.hud.hitMarker(true); sfx.kill(); }
+    });
+
+    net.on('respawn', (msg) => {
+      const r = this.remotes.get(msg.id);
+      if (!r) return;
+      if (Array.isArray(msg.p)) r.renderPos.set(msg.p[0], msg.p[1], msg.p[2]);
+      r.buffer.length = 0;
+      r.setAlive(true);
+      if (msg.s) this.scoreboardRows = msg.s;
+    });
+
+    net.on('smoke_deploy', (msg) => {
+      if (!Array.isArray(msg.p)) return;
+      this._spawnSmoke(new THREE.Vector3(msg.p[0], msg.p[1], msg.p[2]), msg.r || 4.7);
+      sfx.deploy();
+    });
+
+    net.on('flash_trigger', (msg) => {
+      if (!Array.isArray(msg.p)) return;
+      this._detonateFlash(new THREE.Vector3(msg.p[0], msg.p[1], msg.p[2]));
+    });
+
+    /* ---- match objective --------------------------------------------------
+       `round` is the single source of truth: phase, time left, which site and
+       the running counts all arrive in it, on every transition and once a
+       second in between. The three event verbs are for the feed and the prop,
+       never for state the round packet already carries. */
+    net.on('round', (msg) => this.objective.applyRound(msg));
+
+    net.on('planted', (msg) => {
+      this.objective.arm(msg.si, msg.p);
+      this.hud.killFeed(this._nameOf(msg.by), `armed site ${msg.sd || '?'}`, 'bomb', msg.by === net.id);
+      sfx.deploy();
+    });
+
+    net.on('defused', (msg) => {
+      this.hud.killFeed(this._nameOf(msg.by), 'defused the bomb', 'defuse', msg.by === net.id);
+      this.objective.disarm();
+    });
+
+    net.on('detonated', (msg) => {
+      this.hud.killFeed('the bomb', `detonated \u2014 site ${msg.sd || '?'}`, 'bomb', false);
+      this.objective.disarm();
+    });
+
+    net.on('pong', () => {
+      this.hud.setNote2(`relay: online  -  ping ${net.ping}ms`);
+    });
+  }
+
+  /** Display name for a player id, for the feed and the objective lines. */
+  _nameOf(id) {
+    if (id === this.net.id) return 'you';
+    const r = this.remotes.get(id);
+    return r ? r.name : (id || 'world');
+  }
+
+  _addRemote(id, name, state) {
+    if (this.remotes.has(id)) return this.remotes.get(id);
+    const side = hashInt(String(id)) % 2;
+    const r = new RemotePlayer(this.scene, id, name, side);
+    r.renderPos.copy(this.player.position);
+    this.remotes.set(id, r);
+    if (state) r.applyState(state);
+    return r;
+  }
+
+  /* ---------------------------------------------------------------- config */
+  _deploy() {
+    const input = document.getElementById('start-name');
+    const name = (input.value || 'OPERATIVE').toUpperCase().slice(0, 16);
+    localStorage.setItem('csb.name', name);
+    this.net.send({ t: 'hello', n: name });
+    sfx.unlock();
+    this._requestLock();
+  }
+
+  _requestLock() {
+    const el = this.renderer.domElement;
+    const p = el.requestPointerLock?.({ unadjustedMovement: true });
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => el.requestPointerLock());
+    }
+  }
+
+  _onLockChange(locked) {
+    this.running = locked;
+    this.overlay.hidden = locked;
+    this.paused.hidden = locked;
+    this.hud.setNote2(this.net.connected ? `relay: online  -  ping ${this.net.ping}ms` : 'relay: offline (solo practice)');
+    if (locked) sfx.unlock();
+  }
+
+  _onResize() {
+    const w = window.innerWidth, h = window.innerHeight;
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.viewCamera.aspect = w / h;
+    this.viewCamera.updateProjectionMatrix();
+    this.renderer.setSize(w, h);
+  }
+
+  _onKeyDown(e) {
+    if (!this.running) {
+      if (e.code === 'Escape') return;
+      return;
+    }
+    switch (e.code) {
+      case 'Digit1': this._switchTo('rifle'); break;
+      case 'Digit2': this._switchTo('pistol'); break;
+      case 'Digit3': this._switchTo('knife'); break;
+      case 'Digit4': this._switchTo('smoke'); break;
+      case 'Digit5': this._switchTo('flash'); break;
+      case 'KeyR': if (this.weapon.startReload()) sfx.reload(); break;
+      case 'Tab': {
+        e.preventDefault();
+        this.hud.renderScoreboard(this);
+        this.hud.el.scoreboard.classList.add('on');
+        break;
+      }
+      default: break;
+    }
+  }
+
+  _switchTo(id) {
+    if (this.inventory.current === id) return;
+    const next = this.inventory.items[id];
+    if (WEAPONS[id].kind === 'throw' && next.ammo <= 0) return;
+    this.inventory.items[this.inventory.current].setActive(false);
+    this.inventory.current = id;
+    this.weapon = next;
+    next.setActive(true);
+    sfx.reload();
+  }
+
+  /* -------------------------------------------------------------- shooting */
+  _pullTrigger() {
+    if (!this.running || !this.player.alive) return;
+    const w = this.weapon;
+    w.triggerHeld = true;
+    if (w.def.kind === 'throw') { this._throwUtility(); return; }
+    this._tryFire();
+  }
+
+  _tryFire() {
+    const w = this.weapon;
+    if (!w.canFire) {
+      if (w.ammo <= 0 && w.def.kind === 'hitscan' && w.reloading <= 0) {
+        if (w.startReload()) sfx.reload();
+      }
+      return;
+    }
+    const now = performance.now() / 1000;
+    w.cooldown = 60 / w.def.rpm;
+    if (w.def.kind === 'hitscan') w.ammo -= 1;
+
+    /* --- spread: base + accumulated + movement penalty ------------------- */
+    if (w.def.kind === 'hitscan') {
+      w.spread = Math.min(w.def.spreadMax, w.spread + w.def.spreadGrowth);
+    }
+    const moving = Math.hypot(this.player.velocity.x, this.player.velocity.z) / CFG.runSpeed;
+    const airborne = this.player.grounded ? 0 : 1;
+    const totalSpread = (w.def.spread || 0) + w.spread + moving * w.def.movingSpread + airborne * 0.05;
+
+    this.camera.getWorldDirection(this._forward);
+    const dir = this._forward.clone();
+    if (totalSpread > 0) {
+      dir.x += (Math.random() - 0.5) * totalSpread * 2;
+      dir.y += (Math.random() - 0.5) * totalSpread * 2;
+      dir.z += (Math.random() - 0.5) * totalSpread * 2;
+      dir.normalize();
+    }
+
+    const origin = this.camera.position.clone();
+    const result = this._trace(origin, dir, w.def.range, w.def);
+
+    /* --- effects ----------------------------------------------------------
+       The viewmodel lives in its OWN scene, so `getWorldPosition` on its
+       muzzle returns camera-local coordinates. Map them through the camera
+       before handing them to anything that lives in the world scene, or the
+       tracer would streak out of the map origin instead of out of the gun. */
+    this.camera.updateMatrixWorld();
+    const muzzle = this._v2.copy(w.muzzleWorld(this._muzzleWorld));
+    this.camera.localToWorld(muzzle);
+    if (w.def.tracer) this.tracers.fire(muzzle, result.point);
+
+    if (result.type === 'wall') {
+      this.decals.place(result.point, result.normal, 1);
+      this.impacts.burst(result.point, result.normal, 5);
+      sfx.impact();
+    } else if (result.type === 'player') {
+      const victim = result.player;
+      const dmg = Math.round(w.def.damage * result.multiplier);
+      const newHp = Math.max(0, (victim.hp || 100) - dmg);
+      this.net.send({ t: 'hit', v: victim.id, dmg, hp: newHp, w: w.def.id, hs: result.multiplier >= 3 ? 1 : 0 });
+      this.impacts.burst(result.point, dir.clone().negate(), 4, 0xc23a2a);
+      this.hud.hitMarker(newHp <= 0);
+      sfx.hit();
+    }
+
+    /* --- muzzle light + recoil -------------------------------------------- */
+    this.muzzleLight.position.copy(muzzle);
+    this.muzzleLight.intensity = 46 * (w.def.volume || 1);
+    this.muzzleLightTimer = 0.045;
+    if (w.def.recoil) {
+      this.player.addRecoil(
+        w.def.recoil.pitch * (1 + moving * 0.6),
+        (Math.random() - 0.5) * 2 * w.def.recoil.yaw
+      );
+    }
+    this._viewKick = w.def.kick || 0.05;
+    if (w.def.volume) (w.def.id === 'rifle' ? sfx.rifle() : sfx.pistol());
+
+    /* --- broadcast the shot so others can see and hear it ------------------ */
+    this.net.send({
+      t: 'fire',
+      w: w.def.id,
+      o: [+origin.x.toFixed(2), +origin.y.toFixed(2), +origin.z.toFixed(2)],
+      d: [+dir.x.toFixed(3), +dir.y.toFixed(3), +dir.z.toFixed(3)],
+    });
+  }
+
+  /**
+   * One ray, two candidate sets: level geometry (raycast + face normal) and
+   * every remote body (two AABBs, so headshots are a real thing).
+   */
+  _trace(origin, dir, range, def) {
+    this._ray.set(origin, dir);
+    this._ray.far = range;
+    const hits = this._ray.intersectObjects(this.level.solids, false);
+    let best = null;
+    if (hits.length) {
+      const h = hits[0];
+      const n = h.face
+        ? h.face.normal.clone().transformDirection(h.object.matrixWorld)
+        : dir.clone().negate();
+      best = { type: 'wall', point: h.point.clone(), normal: n, distance: h.distance };
+    }
+
+    const headMul = (def && def.headMul) || 3;
+    const limbMul = (def && def.limbMul) || 0.72;
+    const ray = new THREE.Ray(origin, dir);
+    for (const r of this.remotes.values()) {
+      if (!r.alive) continue;
+      // the head region is the top slice of the body box
+      const head = r.boxUpper.clone();
+      head.min.y = r.group.position.y + 1.36;
+      const headHit = ray.intersectBox(head, _scratchVec);
+      const headPoint = headHit && headHit.clone();
+      const bodyHit = ray.intersectBox(r.boxUpper, _scratchVec);
+      const bodyPoint = bodyHit && bodyHit.clone();
+      const legHit = ray.intersectBox(r.boxLower, _scratchVec);
+      const legPoint = legHit && legHit.clone();
+
+      let nearest = null;
+      let mul = 1;
+      const consider = (point, m) => {
+        if (!point) return;
+        if (!nearest || point.distanceTo(origin) < nearest.distanceTo(origin)) { nearest = point; mul = m; }
+      };
+      consider(headPoint, headMul);
+      consider(bodyPoint, 1);
+      consider(legPoint, limbMul);
+      if (!nearest) continue;
+
+      const d = nearest.distanceTo(origin);
+      if (best && d >= best.distance) continue;
+      best = { type: 'player', point: nearest, normal: dir.clone().negate(), distance: d,
+               player: r, multiplier: mul };
+    }
+    return best || { type: 'none', point: origin.clone().addScaledVector(dir, range),
+                     normal: dir.clone().negate(), distance: range, multiplier: 1 };
+  }
+
+  _takeDamage(msg) {
+    if (!this.player.alive) return;
+    // `hp` is the victim health the shooter computed. Monotonic guard: taking
+    // the minimum means a reordered or duplicated packet can never heal you.
+    const hp = typeof msg.hp === 'number' ? msg.hp : Math.max(0, this.player.hp - (msg.dmg || 0));
+    this.player.hp = Math.max(0, Math.min(this.player.hp, hp));
+    this.hud.damageFlash(msg.dmg || 0);
+    const shooter = this.remotes.get(msg.id);
+    this.lastHitBy = { id: msg.id, weapon: msg.w || 'rifle', name: shooter?.name || msg.id };
+    sfx.impact();
+
+    if (this.player.hp <= 0) this._die(shooter, msg);
+  }
+
+  _die(shooter, msg) {
+    this.player.hp = 0;
+    this.player.alive = false;
+    this.respawnTimer = 3;
+    this.net.send({ t: 'death', by: msg.id || null, w: msg.w || 'rifle' });
+    document.getElementById('death-by').textContent =
+      (shooter?.name || msg.id || 'unknown').toUpperCase();
+  }
+
+  _respawn() {
+    const occupied = [];
+    for (const r of this.remotes.values()) occupied.push(r.group.position);
+    const p = this.level.spawnPoint(occupied);
+    this.player.spawn(p);
+    for (const id of SLOT_ORDER) {
+      const w = this.inventory.items[id];
+      w.ammo = w.def.kind === 'hitscan' ? w.def.magSize : (w.def.count || 0);
+      w.reserve = w.def.reserve ?? 0;
+      w.reloading = 0;
+      w.cooldown = 0;
+      w.spread = w.def.spread || 0;
+    }
+    document.getElementById('death-by').textContent = '--';
+    this.lastHitBy = null;
+    this.net.send({ t: 'respawn', p: [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)] });
+    this._switchTo('rifle');
+  }
+
+  /* -------------------------------------------------------------- utility */
+  _throwUtility() {
+    const w = this.weapon;
+    if (w.ammo <= 0) return;
+    w.ammo -= 1;
+    w.cooldown = 0.75;
+
+    this.camera.getWorldDirection(this._forward);
+    const dir = this._forward.clone();
+    dir.y += 0.18;                 // a natural throwing arc
+    dir.normalize();
+
+    this.grenades.push({
+      type: w.def.id,
+      def: w.def,
+      pos: this.camera.position.clone().addScaledVector(dir, 0.55),
+      vel: dir.multiplyScalar(w.def.throwSpeed),
+      fuse: w.def.id === 'flash' ? w.def.fuse : Infinity,
+      mesh: this._makeGrenadeMesh(w.def.id),
+    });
+    sfx.knife();
+  }
+
+  _makeGrenadeMesh(type) {
+    const mat = new THREE.MeshStandardMaterial({
+      color: type === 'smoke' ? 0x4d5a4a : 0x9a9a9a,
+      roughness: 0.6, metalness: 0.35,
+    });
+    const m = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), mat);
+    m.castShadow = true;
+    this.scene.add(m);
+    return m;
+  }
+
+  _updateGrenades(dt) {
+    for (let i = this.grenades.length - 1; i >= 0; i--) {
+      const g = this.grenades[i];
+      g.vel.y -= CFG.gravity * dt;
+      const step = g.vel.clone().multiplyScalar(dt);
+      const dist = step.length();
+      let detonated = false;
+
+      if (dist > 1e-5) {
+        this._ray.set(g.pos, step.clone().normalize());
+        this._ray.far = dist + 0.075;
+        const hits = this._ray.intersectObjects(this.level.solids, false);
+        if (hits.length) {
+          const h = hits[0];
+          // stand the charge off the surface a touch so the cloud is not half
+          // buried inside the wall it landed against
+          const n = h.face ? h.face.normal.clone().transformDirection(h.object.matrixWorld)
+                           : new THREE.Vector3(0, 1, 0);
+          g.pos.copy(h.point).addScaledVector(n, 0.16);
+          detonated = true;
+        } else {
+          g.pos.add(step);
+        }
+      }
+
+      g.fuse -= dt;
+      if (g.fuse <= 0) detonated = true;
+
+      g.mesh.position.copy(g.pos);
+      g.mesh.rotation.x += dt * 6;
+      g.mesh.rotation.z += dt * 4;
+
+      if (detonated) {
+        this.scene.remove(g.mesh);
+        g.mesh.geometry.dispose();
+        g.mesh.material.dispose();
+        this.grenades.splice(i, 1);
+
+        if (g.type === 'smoke') {
+          this._spawnSmoke(g.pos, g.def.cloudRadius);
+          this.net.send({ t: 'smoke_deploy', p: [+g.pos.x.toFixed(2), +g.pos.y.toFixed(2), +g.pos.z.toFixed(2)], r: g.def.cloudRadius });
+        } else {
+          this.net.send({ t: 'flash_trigger', p: [+g.pos.x.toFixed(2), +g.pos.y.toFixed(2), +g.pos.z.toFixed(2)] });
+          this._detonateFlash(g.pos);
+        }
+      }
+    }
+  }
+
+  _spawnSmoke(pos, radius) {
+    this.smokes.push(new SmokeCloud(this.scene, pos, radius));
+    // hard cap so a griefed lobby cannot tank the client's frame rate
+    while (this.smokes.length > 12) {
+      const old = this.smokes.shift();
+      old?.dispose();
+    }
+  }
+
+  /** Line-of-sight test, ignoring bodies (smoke and walls both block). */
+  _hasLineOfSight(from, to) {
+    const dir = to.clone().sub(from);
+    const dist = dir.length();
+    if (dist < 0.4) return true;
+    dir.multiplyScalar(1 / dist);
+    this._ray.set(from, dir);
+    this._ray.far = dist;
+    const hits = this._ray.intersectObjects(this.level.solids, false);
+    if (hits.length && hits[0].distance < dist - 0.1) return false;
+    // hand-placed smoke also cuts the flash, matching how it cuts vision
+    for (const s of this.smokes) {
+      const d = s.position.distanceTo(from);
+      if (d < s.radius * 1.1) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Flash intensity: closer and more on-axis = worse, and anything behind you
+   * or on the other side of a wall contributes nothing. Purely a client-local
+   * decision, which is why the relay only has to forward the trigger point.
+   */
+  _detonateFlash(pos) {
+    const eye = this.camera.position;
+    this.camera.getWorldDirection(this._forward);
+
+    const delta = pos.clone().sub(eye);
+    const dist = delta.length();
+    const range = WEAPONS.flash.flashRange;
+    if (dist > range) { sfx.deploy(); return; }
+
+    const dir = delta.multiplyScalar(1 / Math.max(0.001, dist));
+    const facing = Math.max(0, dir.dot(this._forward));
+    if (facing <= 0.02) { sfx.deploy(); return; }
+
+    if (!this._hasLineOfSight(eye, pos)) { sfx.deploy(); return; }
+
+    const falloff = 1 - dist / range;
+    const level = clamp(Math.pow(facing, 0.55) * (0.35 + falloff * 1.25), 0, 1);
+    this.hud.addFlash(level);
+    sfx.deploy();
+    sfx.ring(0.6 + level * 4.5);
+  }
+
+  _remoteFireEffect(msg) {
+    if (!Array.isArray(msg.o) || !Array.isArray(msg.d)) return;
+    const def = WEAPONS[msg.w] || WEAPONS.rifle;
+    const from = new THREE.Vector3(msg.o[0], msg.o[1], msg.o[2]);
+    const dir = new THREE.Vector3(msg.d[0], msg.d[1], msg.d[2]).normalize();
+    const hit = this._trace(from, dir, def.range, def);
+    if (def.tracer) this.tracers.fire(from, hit.point);
+    if (hit.type === 'wall') {
+      this.decals.place(hit.point, hit.normal, 0.85);
+      this.impacts.burst(hit.point, hit.normal, 3);
+    }
+    // Gunfire is heard through distance: cheap inverse-square-ish falloff.
+    const d = from.distanceTo(this.camera.position);
+    const gain = clamp(1 - d / 90, 0.06, 1);
+    if (gain > 0.12) (def.id === 'rifle' ? sfx.rifle() : def.id === 'pistol' ? sfx.pistol() : null);
+    sfx.impact();
+  }
+
+  /* ---------------------------------------------------------------- frame */
+  _loop() {
+    requestAnimationFrame(() => this._loop());
+    const now = performance.now();
+    let dt = (now - this.last) / 1000;
+    this.last = now;
+    if (dt > 0.1) dt = 0.1;             // tab-switch / stall guard
+    if (dt <= 0) dt = 1 / 240;
+
+    this._frames++;
+    this._acc += dt;
+    if (this._acc > 0.5) { this.fps = Math.round(this._frames / this._acc); this._frames = 0; this._acc = 0; }
+
+    this._update(dt);
+
+    /* two-pass render: world, then the viewmodel on a cleared depth buffer */
+    this.renderer.render(this.scene, this.camera);
+    this.renderer.autoClear = false;
+    this.renderer.clearDepth();
+    this.renderer.render(this.viewScene, this.viewCamera);
+    this.renderer.autoClear = true;
+  }
+
+  _update(dt) {
+    const input = this.input;
+    const player = this.player;
+
+    // Consume accumulated mouse delta exactly once per frame, then reuse it
+    // for both the camera and the viewmodel sway below.
+    let lookX = 0;
+    let lookY = 0;
+    if (this.running) {
+      const m = input.consumeMouse();
+      lookX = m.dx; lookY = m.dy;
+      if (player.alive) {
+        player.look(m.dx, m.dy);
+      } else {
+        // Dead: the camera may still be dragged around, but the body cannot move.
+        player.yaw -= m.dx * CFG.sensitivity;
+        player.pitch = clamp(player.pitch - m.dy * CFG.sensitivity, -CFG.pitchLimit, CFG.pitchLimit);
+      }
+    }
+
+    /* Fully automatic weapons (and the knife, which swings on a hold) repeat
+       while the button is down; semi-auto weapons only fire per click. */
+    if (this.running && player.alive && input.mouse.down) {
+      const w = this.weapon;
+      if (w.def.auto) {
+        while (w.cooldown <= 0 && w.ammo > 0 && w.reloading <= 0) this._tryFire();
+      }
+    }
+
+    /* --- respawn ---------------------------------------------------------- */
+    if (!player.alive) {
+      this.respawnTimer -= dt;
+      if (this.respawnTimer <= 0) this._respawn();
+    }
+
+    /* --- simulate --------------------------------------------------------- */
+    player.update(dt, this.running && player.alive ? input : EMPTY_INPUT);
+    for (const w of Object.values(this.inventory.items)) w.tick(dt);
+    this._updateGrenades(dt);
+    this.impacts.update(dt);
+    this.tracers.update(dt);
+
+    for (let i = this.smokes.length - 1; i >= 0; i--) {
+      const s = this.smokes[i];
+      s.update(dt);
+      if (s.done) { s.dispose(); this.smokes.splice(i, 1); }
+    }
+
+    for (const r of this.remotes.values()) r.update(dt, this.camera.position);
+
+    /* --- camera ----------------------------------------------------------- */
+    this.camera.position.set(
+      player.position.x,
+      player.position.y + player.eye + player.bob - player.landKick * 0.4,
+      player.position.z
+    );
+    this.camera.rotation.set(
+      clamp(player.pitch + player.recoilPitch, -CFG.pitchLimit * 1.4, CFG.pitchLimit * 1.4),
+      player.yaw + player.recoilYaw,
+      0
+    );
+
+    /* --- viewmodel sway / bob / kick --------------------------------------- */
+    const w = this.weapon;
+    const swayX = clamp(-lookX * 0.0006, -0.02, 0.02);
+    const swayY = clamp(-lookY * 0.0006, -0.02, 0.02);
+    this._viewKick = damp(this._viewKick || 0, 0, 12, dt);
+    const breathe = Math.sin(performance.now() * 0.0016) * 0.004;
+    const target = this._v1.set(
+      w.position.x + swayX,
+      w.position.y - player.bob * 0.9 + swayY + breathe,
+      w.position.z + this._viewKick
+    );
+    w.model.position.lerp(target, 1 - Math.exp(-18 * dt));
+    w.model.rotation.x = damp(w.model.rotation.x, -this._viewKick * 3.2 + player.bob * 0.6, 14, dt);
+    w.model.rotation.y = damp(w.model.rotation.y, swayX * 2.4, 12, dt);
+    w.model.rotation.z = damp(w.model.rotation.z, swayX * 1.2 + (w.reloading > 0 ? 0.35 : 0), 10, dt);
+    w.model.position.y -= w.reloading > 0 ? 0.08 : 0;
+
+    // throwables drop out of view once thrown
+    if (w.def.kind === 'throw') w.model.position.y -= 0.22;
+
+    /* --- muzzle light decay ------------------------------------------------ */
+    if (this.muzzleLightTimer > 0) {
+      this.muzzleLightTimer -= dt;
+      if (this.muzzleLightTimer <= 0) this.muzzleLight.intensity = 0;
+    }
+
+    /* --- network stream ----------------------------------------------------
+       Movement is the bulk of all traffic, so it is rate-limited and then
+       further filtered inside _sendMove: nothing goes out unless the pose
+       actually changed. */
+    this._netAccum += dt;
+    if (this._netAccum >= 1 / CFG.sendRate) {
+      this._netAccum = 0;
+      this._sendMove();
+    }
+
+    /* --- tab / scoreboard --------------------------------------------------- */
+    if (!input.down('Tab')) this.hud.el.scoreboard.classList.remove('on');
+
+    /* --- match objective ---------------------------------------------------- */
+    this.objective.update(dt, this.player, input, this.net);
+    this.objective.tick(dt);
+
+    this.hud.update(dt, this);
+  }
+
+  _sendMove() {
+    const p = this.player;
+    const last = this._lastSent;
+    const moved = !last
+      || Math.abs(last.x - p.position.x) > CFG.positionEpsilon
+      || Math.abs(last.y - p.position.y) > CFG.positionEpsilon
+      || Math.abs(last.z - p.position.z) > CFG.positionEpsilon
+      || Math.abs(last.yaw - p.yaw) > CFG.angleEpsilon
+      || Math.abs(last.pitch - p.pitch) > CFG.angleEpsilon
+      || last.alive !== p.alive
+      || last.weapon !== this.inventory.current
+      || last.hp !== p.hp
+      || last.crouch !== p.crouching;
+
+    if (!moved) return;
+
+    this._lastSent = {
+      x: p.position.x, y: p.position.y, z: p.position.z,
+      yaw: p.yaw, pitch: p.pitch,
+      alive: p.alive, weapon: this.inventory.current, hp: p.hp, crouch: p.crouching,
+    };
+
+    this.net.send({
+      t: 'move',
+      p: [+p.position.x.toFixed(2), +p.position.y.toFixed(2), +p.position.z.toFixed(2)],
+      y: +p.yaw.toFixed(3),
+      pi: +p.pitch.toFixed(3),
+      w: this.inventory.current,
+      hp: Math.round(p.hp),
+      al: p.alive ? 1 : 0,
+      c: p.crouching ? 1 : 0,
+    });
+  }
+
+  scoreRows() {
+    const rows = [];
+    const me = this.net.id;
+    const rowById = new Map();
+    for (const r of this.scoreboardRows) rowById.set(r[0], { kills: r[1], deaths: r[2] });
+
+    const mine = rowById.get(me) || { kills: 0, deaths: 0 };
+    rows.push({ id: me || 'me', name: (localStorage.getItem('csb.name') || 'YOU').toUpperCase(),
+                kills: mine.kills, deaths: mine.deaths, ping: this.net.connected ? this.net.ping : 0, me: true });
+
+    for (const r of this.remotes.values()) {
+      const s = rowById.get(r.id) || { kills: 0, deaths: 0 };
+      rows.push({ id: r.id, name: r.name, kills: s.kills, deaths: s.deaths,
+                  ping: 0, me: false });
+    }
+    rows.sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
+    return rows;
+  }
+}
+
+/* An input stub so a dead player simply cannot move. */
+const EMPTY_INPUT = {
+  down: () => false,
+  mouse: { down: false },
+  consumeMouse: () => ({ dx: 0, dy: 0 }),
+};
+
+/* ===========================================================================
+   [ 12 ] ENDPOINT RESOLUTION
+   ---------------------------------------------------------------------------
+   See the NETWORK CONFIG block at the top of this module. Order:
+   explicit constant -> ?server= query param -> page origin.
+   =========================================================================== */
+function resolveEndpoint() {
+  if (WS_ENDPOINT) return WS_ENDPOINT;
+
+  const fromQuery = new URLSearchParams(location.search).get('server');
+  if (fromQuery) return fromQuery;
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${location.host}/`;
+}
+
+/* ===========================================================================
+   BOOT
+   =========================================================================== */
+try {
+  const game = new Game();
+  window.__game = game;   // handy from devtools; harmless in production
+  game.init();
+} catch (err) {
+  console.error(err);
+  const boot = document.getElementById('boot');
+  boot.hidden = false;
+  boot.innerHTML = `<div class="txt" style="max-width:60ch;text-align:center">engine failed to start &mdash; <b>${String(err.message)}</b></div>`;
+}
+</script>
+</body>
+</html>
